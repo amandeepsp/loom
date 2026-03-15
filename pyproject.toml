@@ -1,0 +1,27 @@
+[project]
+name = "accel"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "amaranth>=0.5.8",
+    "litex",
+    "litex-boards",
+    "litedram",
+    "pythondata-cpu-vexriscv",
+    "pythondata-software-compiler_rt",
+    "pythondata-software-picolibc",
+    "pytest>=9.0.2",
+    "liteeth",
+    "pythondata-misc-tapcfg",
+]
+
+[tool.uv.sources]
+litex = { path = "../litex/litex", editable = true }
+litex-boards = { path = "../litex/litex-boards", editable = true }
+litedram = { path = "../litex/litedram", editable = true }
+liteeth = { path = "../litex/liteeth", editable = true }
+pythondata-cpu-vexriscv = { path = "../litex/pythondata-cpu-vexriscv", editable = true }
+pythondata-software-compiler_rt = { path = "../litex/pythondata-software-compiler_rt", editable = true }
+pythondata-software-picolibc = { path = "../litex/pythondata-software-picolibc", editable = true }
+pythondata-misc-tapcfg = { path = "../litex/pythondata-misc-tapcfg", editable = true }

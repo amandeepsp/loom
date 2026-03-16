@@ -4,10 +4,10 @@ ENTRY(_start)
 __DYNAMIC = 0;
 
 MEMORY {
-	rom : ORIGIN = 0x00000000, LENGTH = 0x00020000
-	sram : ORIGIN = 0x10000000, LENGTH = 0x00002000
+	rom      : ORIGIN = 0x00000000, LENGTH = 0x00020000
+	sram     : ORIGIN = 0x10000000, LENGTH = 0x00002000
 	main_ram : ORIGIN = 0x40000000, LENGTH = 0x00800000
-	csr : ORIGIN = 0xf0000000, LENGTH = 0x00010000
+	csr      : ORIGIN = 0xf0000000, LENGTH = 0x00010000
 }
 
 SECTIONS
@@ -15,12 +15,10 @@ SECTIONS
 	.text :
 	{
 		_ftext = .;
-		/* Make sure crt0 files come first, and they, and the isr */
-		/* don't get disposed of by greedy optimisation */
+		/* Ensure crt0 comes first and isn't discarded */
 		*crt0*(.text)
 		KEEP(*crt0*(.text))
 		KEEP(*(.text.isr))
-
 		*(.text .stub .text.* .gnu.linkonce.t.*)
 		_etext = .;
 	} > main_ram

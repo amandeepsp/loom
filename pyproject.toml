@@ -17,11 +17,11 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-litex = { path = "../litex/litex", editable = true }
-litex-boards = { path = "../litex/litex-boards", editable = true }
-litedram = { path = "../litex/litedram", editable = true }
-liteeth = { path = "../litex/liteeth", editable = true }
-pythondata-cpu-vexriscv = { path = "../litex/pythondata-cpu-vexriscv", editable = true }
-pythondata-software-compiler_rt = { path = "../litex/pythondata-software-compiler_rt", editable = true }
-pythondata-software-picolibc = { path = "../litex/pythondata-software-picolibc", editable = true }
-pythondata-misc-tapcfg = { path = "../litex/pythondata-misc-tapcfg", editable = true }
+# litex = { path = "../litex/litex", editable = true }
+# litex-boards = { path = "../litex/litex-boards", editable = true }
+# litedram = { path = "../litex/litedram", editable = true }
+# liteeth = { path = "../litex/liteeth", editable = true }
+# pythondata-cpu-vexriscv = { path = "../litex/pythondata-cpu-vexriscv", editable = true }
+# pythondata-software-compiler_rt = { path = "../litex/pythondata-software-compiler_rt", editable = true }
+# pythondata-software-picolibc = { path = "../litex/pythondata-software-picolibc", editable = true }
+# pythondata-misc-tapcfg = { path = "../litex/pythondata-misc-tapcfg", editable = true }

@@ -1,19 +1,16 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
+# Build artifacts
 build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-surfur
-
+top.v
 *.vcd
-*.log
+firmware/.zig-cache/
+firmware/zig-out/
+firmware/crt0.o
 
-demo/
-docs/
-.zig-cache/
-zig-out/
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor
+*.swp
+*~

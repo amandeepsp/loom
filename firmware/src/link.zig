@@ -28,10 +28,16 @@ pub const Response = extern struct {
 pub const LinkError = error{ BadMagic, Timeout };
 
 pub fn recv_header() LinkError!Header {
+    // Sync: skip bytes until we find the magic request byte.
+    while (true) {
+        const b = uart.read_byte_blocking();
+        if (b == MAGIC_REQ) break;
+    }
+    // Read remaining 7 bytes of the header.
     var header: Header = undefined;
     const buf: []u8 = std.mem.asBytes(&header);
-    uart.read_bytes(buf);
-    if (header.magic != MAGIC_REQ) return error.BadMagic;
+    buf[0] = MAGIC_REQ;
+    uart.read_bytes(buf[1..]);
     return header;
 }
 

@@ -1,43 +1,31 @@
-const CSR_BASE: usize = 0x12000000; // from generated/csr.zig CSR_BASE
+/// UART driver for LiteX SoC.
 
-inline fn rd(offset: usize) u32 {
-    return @as(*volatile u32, @ptrFromInt(CSR_BASE + offset)).*;
-}
-inline fn wr(offset: usize, v: u32) void {
-    @as(*volatile u32, @ptrFromInt(CSR_BASE + offset)).* = v;
-}
+const csr = @import("csr.zig");
+const mmio = @import("mmio.zig");
 
-pub inline fn rxtx_read() u32 {
-    return rd(0x3000);
-}
-pub inline fn rxtx_write(v: u32) void {
-    wr(0x3000, v);
-}
-pub inline fn txfull_read() u32 {
-    return rd(0x3004);
-}
-pub inline fn rxempty_read() u32 {
-    return rd(0x3008);
-}
-pub inline fn txempty_read() u32 {
-    return rd(0x3018);
-}
-pub inline fn rxfull_read() u32 {
-    return rd(0x301c);
-}
-pub inline fn ev_pending_write(v: u32) void {
-    wr(0x3010, v);
+const rxtx = mmio.Reg(csr.uart_rxtx);
+const txfull = mmio.Reg(csr.uart_txfull);
+const rxempty = mmio.Reg(csr.uart_rxempty);
+const ev_pending = mmio.Reg(csr.uart_ev_pending);
+const ev_enable = mmio.Reg(csr.uart_ev_enable);
+
+/// Clear pending events and enable TX/RX.
+pub fn init() void {
+    ev_enable.write(0);
+    ev_pending.write(ev_pending.read());
+    ev_enable.write(0x3); // UART_EV_TX | UART_EV_RX
 }
 
-// Higher-level helpers used by link.zig
 pub fn write_byte(b: u8) void {
-    while (txfull_read() != 0) {}
-    rxtx_write(b);
+    while (txfull.read() != 0) {}
+    rxtx.write(b);
 }
 
 pub fn read_byte_blocking() u8 {
-    while (rxempty_read() != 0) {}
-    return @truncate(rxtx_read());
+    while (rxempty.read() != 0) {}
+    const b: u8 = @truncate(rxtx.read());
+    ev_pending.write(0x2); // ack UART_EV_RX
+    return b;
 }
 
 pub fn write_bytes(buf: []const u8) void {
@@ -46,4 +34,12 @@ pub fn write_bytes(buf: []const u8) void {
 
 pub fn read_bytes(buf: []u8) void {
     for (buf) |*b| b.* = read_byte_blocking();
+}
+
+/// Drain any stale bytes from the RX FIFO.
+pub fn drain_rx() void {
+    while (rxempty.read() == 0) {
+        _ = rxtx.read();
+        ev_pending.write(0x2);
+    }
 }

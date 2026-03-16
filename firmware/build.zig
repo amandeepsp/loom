@@ -26,14 +26,28 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
+    // --- CSR definitions (board-specific) ---
+    const board = b.option([]const u8, "board", "Target board: 'sim' (default) or 'hw'") orelse "sim";
+    const csr_path = if (std.mem.eql(u8, board, "hw"))
+        b.path("src/csr_hw.zig")
+    else
+        b.path("src/csr_sim.zig");
+
     // --- Build firmware ELF ---
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("csr", b.createModule(.{
+        .root_source_file = csr_path,
+        .target = target,
+        .optimize = optimize,
+    }));
+
     const exe = b.addExecutable(.{
         .name = "firmware",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = root_module,
     });
 
     exe.addObjectFile(.{ .cwd_relative = crt0_path });
@@ -41,9 +55,10 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    // --- ELF → flat binary (GNU objcopy; Zig 0.15's built-in is buggy) ---
+    // ELF → flat binary (GNU objcopy; Zig 0.15's built-in is buggy, pads the binary with zeros)
     const objcopy_prog = b.findProgram(
-        &.{ "riscv64-elf-objcopy", "riscv64-unknown-elf-objcopy", "riscv32-elf-objcopy" },
+        &.{ "riscv64-elf-objcopy", "riscv64-unknown-elf-objcopy", "riscv64-linux-gnu-objcopy" },
+        &.{"/usr/bin"},
     ) catch @panic("no riscv objcopy found in PATH");
     const objcopy = b.addSystemCommand(&.{
         objcopy_prog, "-O", "binary",

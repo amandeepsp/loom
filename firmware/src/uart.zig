@@ -1,6 +1,6 @@
 /// UART driver for LiteX SoC.
 
-const csr = @import("csr.zig");
+const csr = @import("csr");
 const mmio = @import("mmio.zig");
 
 const rxtx = mmio.Reg(csr.uart_rxtx);

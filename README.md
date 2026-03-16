@@ -36,6 +36,20 @@ cd firmware && zig build -Dcrt0=crt0.o && cd ..
 uv run python host/client.py --test -v
 ```
 
+### Build for Tang Nano 20k
+1. Add `oss-cad-suite` to `PATH`
+2. Build the SOC for board and firmware
+```sh
+uv run python -m litex_boards.targets.sipeed_tang_nano_20k --build --toolchain apicula --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v
+
+zig build -Dcrt0=../build/sipeed_tang_nano_20k/software/bios/crt0.o
+```
+3. Flash 
+```sh
+uv run python -m litex_boards.targets.sipeed_tang_nano_20k --flash
+```
+
+
 ## Architecture (50-minute deep dive)
 
 ### The SoC

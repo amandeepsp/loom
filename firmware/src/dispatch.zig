@@ -5,9 +5,18 @@ const cfu = @import("cfu.zig");
 
 pub fn dispatch(header: link.Header) void {
     switch (header.op) {
+        .ping => handle_ping(header),
         .mac4 => handle_mac4(header),
         else => link.send_error(header.seq_id, 0x01),
     }
+}
+
+fn handle_ping(header: link.Header) void {
+    if (header.payload_len != 0) {
+        link.send_error(header.seq_id, 0x02);
+        return;
+    }
+    link.send_ok(header.seq_id, &.{}, 0);
 }
 
 fn handle_mac4(header: link.Header) void {

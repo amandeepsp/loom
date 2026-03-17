@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-from .protocol import MAGIC_RESP, make_mac4_request, parse_response
+from .protocol import MAGIC_RESP, make_mac4_request, make_ping_request, parse_response
 
 
 class SimLink:
@@ -36,7 +36,7 @@ class SimLink:
             "--non-interactive",
         ]
         if verbose:
-            print(f"[host] launching sim...")
+            print("[host] launching sim...")
 
         self.proc = subprocess.Popen(
             cmd,
@@ -62,23 +62,26 @@ class SimLink:
                 return text
         raise TimeoutError(f"Timed out. Got: {buf[-200:]!r}")
 
+    def ping(self, seq_id: int = 0) -> bool:
+        resp = self._exchange(make_ping_request(seq_id))
+        return resp["status"] == 0
+
     def mac4(self, a: int, b: int, seq_id: int = 1) -> int:
-        req = make_mac4_request(a, b, seq_id)
+        resp = self._exchange(make_mac4_request(a, b, seq_id))
+        return resp["result"]
+
+    def _exchange(self, req: bytes) -> dict:
         if self.verbose:
             print(f"[host] >> {req.hex()}")
         self.proc.stdin.write(req)
         self.proc.stdin.flush()
 
-        # Read 8-byte response header
         resp_hdr = self._read_exact(8)
         if self.verbose:
             print(f"[host] << hdr: {resp_hdr.hex()}")
 
         magic, status, payload_len, r_seq_id, cycles = struct.unpack("<BBHHH", resp_hdr)
-
-        # Skip non-response bytes (firmware debug output mixed in)
         while magic != MAGIC_RESP:
-            # Shift by 1 byte and read another
             resp_hdr = resp_hdr[1:] + self._read_exact(1)
             magic, status, payload_len, r_seq_id, cycles = struct.unpack(
                 "<BBHHH", resp_hdr
@@ -93,7 +96,7 @@ class SimLink:
 
         if resp["status"] != 0:
             raise RuntimeError(f"Firmware error: status=0x{resp['status']:02x}")
-        return resp["result"]
+        return resp
 
     def _read_exact(self, n: int) -> bytes:
         buf = b""

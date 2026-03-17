@@ -6,7 +6,7 @@ import time
 import crcmod
 import serial
 
-from .protocol import MAGIC_RESP, make_mac4_request, parse_response
+from .protocol import MAGIC_RESP, make_mac4_request, make_ping_request, parse_response
 
 _crc16 = crcmod.predefined.mkCrcFun("xmodem")
 
@@ -36,7 +36,7 @@ class SerialLink:
             print(f"[host] opened {port} @ {baudrate}")
 
     def wait_for_ready(self, timeout=60) -> str:
-        """Wait for SFL prompt, upload firmware, then wait for '[link] ready'."""
+        """Wait for SFL prompt if needed, then probe firmware readiness with ping."""
         deadline = time.time() + timeout
         buf = b""
 
@@ -46,7 +46,12 @@ class SerialLink:
         sfl_magic_ack = b"z6IHG7cYDID6o\n"
 
         if self.no_upload:
-            print("[host] skipping upload, waiting for '[link] ready'...")
+            print("[host] skipping upload, probing running firmware...")
+            self.ser.reset_input_buffer()
+            self._wait_for_ping(deadline)
+            print("[host] ready (serial)")
+            self.ser.timeout = 10
+            return ""
         else:
             print(
                 "[host] waiting for BIOS SFL boot request... (press board reset button)"
@@ -75,34 +80,17 @@ class SerialLink:
                     self.ser.reset_input_buffer()
                     self._sfl_upload()
                     break
-            if self.no_upload and "[link] ready" in buf.decode(
-                "utf-8", errors="replace"
-            ):
-                break
         else:
-            if not self.no_upload:
-                text = buf.decode("utf-8", errors="replace")
-                raise TimeoutError(
-                    f"Timed out waiting for SFL magic. Got:\n{text[-500:]}"
-                )
-
-        # Phase 2: wait for firmware ready message
-        buf = b""
-        while time.time() < deadline:
-            ch = self.ser.read(1)
-            if not ch:
-                continue
-            buf += ch
             text = buf.decode("utf-8", errors="replace")
-            if "[link] ready" in text:
-                if self.verbose:
-                    print(text, end="")
-                print("[host] ready (serial)")
-                self.ser.timeout = 10
-                return ""
-        raise TimeoutError(
-            f"Firmware uploaded but no ready message. Got: {buf[-200:]!r}"
-        )
+            raise TimeoutError(
+                f"Timed out waiting for SFL magic. Got:\n{text[-500:]}"
+            )
+
+        self.ser.reset_input_buffer()
+        self._wait_for_ping(deadline)
+        print("[host] ready (serial)")
+        self.ser.timeout = 10
+        return ""
 
     def _sfl_upload(self):
         """Upload firmware binary using LiteX SFL protocol."""
@@ -155,8 +143,15 @@ class SerialLink:
         if self.verbose:
             print(f"[host] jump command sent, reply={reply!r}")
 
+    def ping(self, seq_id: int = 0) -> bool:
+        resp = self._exchange(make_ping_request(seq_id))
+        return resp["status"] == 0
+
     def mac4(self, a: int, b: int, seq_id: int = 1) -> int:
-        req = make_mac4_request(a, b, seq_id)
+        resp = self._exchange(make_mac4_request(a, b, seq_id))
+        return resp["result"]
+
+    def _exchange(self, req: bytes) -> dict:
         if self.verbose:
             print(f"[host] >> {req.hex()}")
         self.ser.write(req)
@@ -183,7 +178,25 @@ class SerialLink:
 
         if resp["status"] != 0:
             raise RuntimeError(f"Firmware error: status=0x{resp['status']:02x}")
-        return resp["result"]
+        return resp
+
+    def _wait_for_ping(self, deadline: float):
+        last_error = None
+        original_timeout = self.ser.timeout
+        self.ser.timeout = 0.2
+        try:
+            while time.time() < deadline:
+                try:
+                    if self.ping():
+                        return
+                except RuntimeError as exc:
+                    last_error = exc
+                time.sleep(0.1)
+            if last_error is not None:
+                raise TimeoutError(f"Timed out waiting for firmware ping: {last_error}")
+            raise TimeoutError("Timed out waiting for firmware ping response")
+        finally:
+            self.ser.timeout = original_timeout
 
     def _read_exact(self, n: int) -> bytes:
         buf = b""

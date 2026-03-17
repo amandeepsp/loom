@@ -5,6 +5,7 @@ pub const MAGIC_REQ: u8 = 0xCF;
 pub const MAGIC_RESP: u8 = 0xFC;
 
 pub const OpType = enum(u8) {
+    ping = 0x0,
     mac4 = 0x1,
     _,
 };

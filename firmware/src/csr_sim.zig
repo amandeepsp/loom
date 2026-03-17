@@ -1,7 +1,5 @@
-// LiteX CSR addresses for sim SoC (VexRiscv_FullCfu @ 0xf0000000).
-//
-// Regenerate from: build/sim/software/include/generated/csr.h
-//   grep '#define CSR_.*_ADDR' csr.h  (then lowercase, strip prefix/suffix)
+// Auto-generated from build/sim/csr.json — do not edit.
+// Regenerate: python firmware/gen_csr.py build/sim/csr.json
 
 pub const CSR_BASE: usize = 0xf0000000;
 

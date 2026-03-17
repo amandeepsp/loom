@@ -23,31 +23,42 @@ Host PC ──UART──► VexRiscv firmware ──CUSTOM_0 insn──► CFU h
 | `host/`     | Python          | Host-side client that talks to the simulator    |
 | `top.v`     | Verilog (generated) | CFU Verilog output consumed by LiteX       |
 
-### Quick start
+### Quick start (simulator)
 
 ```bash
 # 1. Generate the Verilog CFU
 cd hardware && python top.py && cd ..
 
-# 2. Build the firmware
-cd firmware && zig build -Dcrt0=crt0.o && cd ..
+# 2. Build the firmware (reads csr.json + crt0.o from the LiteX build dir)
+cd firmware && zig build && cd ..   # defaults to -Dbuild-dir=../build/sim
 
 # 3. Run end-to-end test through the LiteX simulator
 uv run python host/client.py --test -v
 ```
 
-### Build for Tang Nano 20k
-1. Add `oss-cad-suite` to `PATH`
-2. Build the SOC for board and firmware
-```sh
-uv run python -m litex_boards.targets.sipeed_tang_nano_20k --build --toolchain apicula --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v
+### Build & test on Tang Nano 20K
 
-zig build -Dcrt0=../build/sipeed_tang_nano_20k/software/bios/crt0.o
-```
-3. Flash 
-```sh
+Prerequisites: add `oss-cad-suite` to `PATH`.
+
+```bash
+# 1. Build the LiteX SoC for the board
+uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
+    --build --toolchain apicula \
+    --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v
+
+# 2. Flash the bitstream
 uv run python -m litex_boards.targets.sipeed_tang_nano_20k --flash
+
+# 3. Build firmware targeting the hardware SoC
+cd firmware && zig build -Dbuild-dir=../build/sipeed_tang_nano_20k && cd ..
+
+# 4. Run tests on the real FPGA (resets board, uploads firmware, runs tests)
+uv run python host/client.py --test --serial /dev/ttyUSB1 -v
 ```
+
+The firmware build reads `csr.json` and `crt0.o` directly from the LiteX build
+directory, so CSR addresses are always in sync with the SoC — no manual codegen
+step needed.
 
 
 ## Architecture (50-minute deep dive)
@@ -117,10 +128,14 @@ A simple framed binary protocol over UART:
 
 ### Host client
 
-`host/client.py` spawns `litex_sim` as a subprocess, waits for the firmware `[link] ready` message, then sends binary requests over stdin/stdout pipes.
+`host/client.py` supports two transports:
+- **SimLink** (default): spawns `litex_sim` and talks over stdin/stdout pipes
+- **SerialLink** (`--serial`): uploads firmware via the LiteX SFL boot protocol and talks over a serial port to a real FPGA
 
 ### Build pipeline
 
 1. **Amaranth → Verilog**: `python hardware/top.py` generates `top.v`
-2. **Zig cross-compile**: `zig build -Dcrt0=crt0.o` produces `firmware.bin`
-3. **LiteX sim**: `litex_sim --cpu-cfu top.v --ram-init firmware.bin` runs the full system
+2. **LiteX SoC build**: generates the SoC, producing `csr.json` and `crt0.o` in the build directory
+3. **Zig cross-compile**: `zig build -Dbuild-dir=<litex-build>` reads `csr.json` for CSR addresses and links `crt0.o`, producing `firmware.bin`
+4. **Test (sim)**: `host/client.py --test` spawns the LiteX simulator
+5. **Test (FPGA)**: `host/client.py --test --serial /dev/ttyUSB1` resets the board, uploads firmware via SFL, and runs tests

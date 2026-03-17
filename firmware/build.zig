@@ -15,23 +15,29 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
 
-    // crt0.o — pre-built from LiteX's crt0.S (required)
-    //   riscv64-elf-gcc -c -march=rv32im_zicsr -mabi=ilp32 -nostdlib \
-    //     $(python -c "import litex.soc.cores.cpu.vexriscv; import os; print(os.path.join(os.path.dirname(litex.soc.cores.cpu.vexriscv.__file__), 'crt0.S'))") \
-    //     -o crt0.o
-    const crt0_path = b.option([]const u8, "crt0", "Path to pre-built crt0.o") orelse {
-        std.debug.print("error: -Dcrt0=<path> is required\n", .{});
-        std.debug.print("build crt0.o from LiteX's crt0.S:\n", .{});
-        std.debug.print("  riscv64-elf-gcc -c -march=rv32im_zicsr -mabi=ilp32 -nostdlib <vexriscv>/crt0.S -o crt0.o\n", .{});
+    // --- LiteX build directory (provides crt0.o and csr.json) ---
+    const build_dir = b.option([]const u8, "build-dir", "LiteX build directory (default: ../build/sim)") orelse "../build/sim";
+
+    const crt0_path = std.fmt.allocPrint(b.allocator, "{s}/software/bios/crt0.o", .{build_dir}) catch @panic("OOM");
+    const csr_json_path = std.fmt.allocPrint(b.allocator, "{s}/csr.json", .{build_dir}) catch @panic("OOM");
+
+    // --- CSR definitions from csr.json ---
+    const csr_options = b.addOptions();
+    const csr_json_contents = std.fs.cwd().readFileAlloc(b.allocator, csr_json_path, 4 * 1024 * 1024) catch |e| {
+        std.debug.print("error: cannot read {s}: {}\n", .{ csr_json_path, e });
+        std.debug.print("hint: run the LiteX SoC build first, then pass -Dbuild-dir=<path>\n", .{});
         std.process.exit(1);
     };
-
-    // --- CSR definitions (board-specific) ---
-    const board = b.option([]const u8, "board", "Target board: 'sim' (default) or 'hw'") orelse "sim";
-    const csr_path = if (std.mem.eql(u8, board, "hw"))
-        b.path("src/csr_hw.zig")
-    else
-        b.path("src/csr_sim.zig");
+    const parsed = std.json.parseFromSlice(std.json.Value, b.allocator, csr_json_contents, .{}) catch |e| {
+        std.debug.print("error: failed to parse {s}: {}\n", .{ csr_json_path, e });
+        std.process.exit(1);
+    };
+    const regs = parsed.value.object.get("csr_registers").?.object;
+    var it = regs.iterator();
+    while (it.next()) |entry| {
+        const addr: usize = @intCast(entry.value_ptr.object.get("addr").?.integer);
+        csr_options.addOption(usize, entry.key_ptr.*, addr);
+    }
 
     // --- Build firmware ELF ---
     const root_module = b.createModule(.{
@@ -39,11 +45,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    root_module.addImport("csr", b.createModule(.{
-        .root_source_file = csr_path,
-        .target = target,
-        .optimize = optimize,
-    }));
+    root_module.addImport("csr", csr_options.createModule());
 
     const exe = b.addExecutable(.{
         .name = "firmware",

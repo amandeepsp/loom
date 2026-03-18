@@ -32,7 +32,7 @@ On a real GPU, launching a kernel costs ~5-10 microseconds *even before any comp
   DMA result back to host memory
 ```
 
-Every layer adds latency. The command buffer is the central abstraction: the driver packs multiple operations into a structured binary blob, sends it across the bus in one shot, and the GPU decodes and executes it. The *format* of that buffer — magic numbers, operation codes, payload lengths — is the contract between driver and hardware.
+Every layer adds latency. The command buffer is the central abstraction: the host-side driver packs multiple operations into a structured binary blob, sends it across the bus in one shot, and the device-side command processor decodes and executes it. The *format* of that buffer — magic numbers, operation codes, payload lengths — is the contract between driver and device.
 
 This matters for ML because frameworks like PyTorch and JAX issue thousands of kernel launches per inference pass. If each launch costs 10 microseconds, 1000 launches cost 10 milliseconds of pure overhead — no compute, just setup. This is why CUDA Graphs, XLA fusion, and `torch.compile` exist: they amortise launch overhead by batching.
 
@@ -40,7 +40,7 @@ This matters for ML because frameworks like PyTorch and JAX issue thousands of k
 
 ---
 
-## Your Driver Stack
+## Your Stack: Driver (Host) → Bus → Command Processor (Device)
 
 You are building the same layered architecture, just smaller:
 
@@ -69,10 +69,10 @@ The project already has a working implementation of this stack:
 
 | Layer | GPU Equivalent | Your File |
 |---|---|---|
-| Host API | CUDA runtime | `host/lib/protocol.py`, `host/client.py` |
+| Host-side driver | CUDA runtime / kernel driver | `host/lib/protocol.py`, `host/client.py` |
 | Wire protocol | Command buffer format | `host/lib/protocol.py` (format), `firmware/src/link.zig` (parser) |
-| Command dispatch | GPU command processor | `firmware/src/dispatch.zig` |
-| Hardware execution | Shader/tensor core | `hardware/cfu.py` via `firmware/src/cfu.zig` |
+| Device command processor | GPU command processor | `firmware/src/dispatch.zig` |
+| Compute hardware | Shader/tensor core | `hardware/cfu.py` via `firmware/src/cfu.zig` |
 
 ---
 

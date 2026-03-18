@@ -40,7 +40,8 @@ Your system follows exactly this pattern:
 | CUDA cores | CFU (Custom Function Unit) |
 | GPU VRAM (80 GB on A100) | BSRAM (5.2 KiB) + SRAM (8 KiB) |
 | Kernel launch | Custom RISC-V instruction |
-| CUDA driver | Zig firmware on VexRiscv soft CPU |
+| CUDA driver | Python host client (`host/client.py`) |
+| GPU command processor | Zig firmware on VexRiscv soft CPU |
 | PyTorch / TinyGrad | TinyGrad with custom lowering |
 
 ```
@@ -75,9 +76,9 @@ Your system follows exactly this pattern:
                                     └────────────────────────────┘
 ```
 
-The VexRiscv firmware is your "GPU driver" — it receives commands, dispatches them to hardware, and returns results. The CFU is your "shader core." The UART is your "PCIe."
+The Python host client is your "GPU driver" — it builds commands, sends them to the device, and reads back results. The VexRiscv firmware is your "GPU command processor" — it sits on the device, decodes incoming commands, dispatches them to hardware, and pushes results back onto the bus. The CFU is your "shader core." The UART is your "PCIe."
 
-> **MLSys Connection:** GPU drivers (like NVIDIA's proprietary blob or Mesa's open-source Nouveau) perform exactly this role: receive high-level commands from the framework, translate them into hardware-specific operations, manage device memory, and shuttle results back. Your Zig firmware is a 200-line version of the same idea.
+> **MLSys Connection:** On a real GPU, the **driver** runs on the host CPU (NVIDIA's kernel-mode driver, Mesa's Nouveau, etc.) and submits command buffers over PCIe. The **command processor** is a fixed-function unit *on the GPU die* that reads those command buffers, decodes them, and dispatches work to the SMs. Your Python host code is the driver. Your Zig firmware is the command processor. Don't confuse the two — the driver never touches the hardware directly; it talks to the device through the bus.
 
 ---
 
@@ -177,7 +178,60 @@ Key differences: (1) Your FPGA has a full CPU (VexRiscv) on the device — GPUs 
 
 ---
 
-## 0.5 The Design Spectrum: Five Tiers of Accelerator
+## 0.5 The Memory Hierarchy: Four Tiers, Just Like a GPU
+
+GPUs have a memory hierarchy: registers (fastest, tiniest) → shared memory → L2 cache → HBM/GDDR (slowest, biggest). Your system has the same structure:
+
+| Tier | GPU | Your System | Size | Bandwidth |
+|---|---|---|---|---|
+| **Registers** | Register file (per-thread) | CFU internal signals (accumulator) | ~32 bits | 1 cycle |
+| **Shared memory** | `__shared__` (per-SM, 48-228 KiB) | BSRAM (~36 KiB free, ~16 blocks) | ~5 KiB usable | 1 cycle |
+| **Global memory** | HBM/GDDR (up to 80 GB) | SPI flash (W25Q64, 8 MB) | 8 MB | ~10-40 MB/s (QSPI) |
+| **Host memory** | CPU system RAM (via PCIe) | Host RAM (via UART) | Unbounded | ~11.5 KB/s |
+
+The SPI flash on-board is the interesting middle tier. It's too slow for cycle-by-cycle access but large enough to hold all MobileNet v2 0.25 weights (~200 KB). The strategy: **pre-load weights from SPI flash into BSRAM before each layer, then compute from BSRAM at full speed.** This is exactly what GPU kernels do — load tiles from global memory into shared memory, synchronize, then compute from shared memory.
+
+```
+  Host RAM         SPI Flash         BSRAM          CFU
+  (weights,        (all model        (active         (compute)
+   activations)     weights)          tile)
+
+  ────────────►  ────────────►  ────────────►  ────────►
+  UART 11.5KB/s  QSPI ~20MB/s  Wire speed      1 cycle
+  one-time load  per-layer DMA  per-cycle read
+```
+
+The practical implication: model weights can live in SPI flash permanently. At inference time, the firmware (or a DMA controller) copies the current layer's weight tile from flash into BSRAM filter stores. This eliminates the UART bottleneck for weight transfer — only activations and results cross the UART.
+
+> **🔗 MLSys Connection:** This is exactly the GPU memory hierarchy strategy. CUDA kernels tile their work to fit in shared memory, load from global memory (HBM) in bulk, compute from shared memory at full bandwidth. The ratio of your BSRAM-to-SPI-flash bandwidth (~1000:1) mirrors the ratio of shared-memory-to-HBM bandwidth on a real GPU (~10-30:1). The principle is the same: make the fast memory work harder by reusing data.
+
+---
+
+## 0.6 Does the CPU Earn Its Keep?
+
+Your system has a VexRiscv soft CPU on the FPGA (~8-10K LUTs — nearly half your free budget). A legitimate question: **should we cut the CPU and connect the UART directly to hardware?**
+
+| | VexRiscv (current) | Pure FPGA fabric (FFHW) |
+|---|---|---|
+| **LUTs** | ~8-10K | ~1-2K for UART+FSM |
+| **Dev velocity** | Firmware recompile: seconds | Resynthesis: minutes |
+| **Debugging** | `uart.write("debug\n")` | Waveform viewer only |
+| **Protocol changes** | Edit Zig, reflash | Edit HDL, resynthesize |
+| **SPI flash driver** | Write a Zig driver | Custom SPI controller FSM |
+| **Inference latency** | Instruction overhead per byte | Deterministic, pipelined |
+| **Freed LUTs** | 0 | ~8K → bigger systolic array |
+
+As the sequencer becomes autonomous (Unit 4+), the CPU's job during inference shrinks to: "write config registers → assert START → wait DONE → drain FIFO." That's a 5-state FSM — you don't need a 32-bit RISC-V CPU for that.
+
+**Why we keep VexRiscv:** Development velocity. Firmware changes in seconds; resynthesis takes minutes. The SPI flash driver is trivial in Zig, painful in pure HDL. And `uart.write()` for debugging is invaluable. Google's CFU-Playground makes the same choice for the same reasons.
+
+**When to consider FFHW:** If you finish the course and want to push performance, removing VexRiscv frees ~8K LUTs — enough for a larger systolic array or double-buffered memory controller. This is a "graduate-level" exercise: replace the soft CPU with a minimal UART-to-register-file FSM.
+
+> **🔗 MLSys Connection:** Real GPUs have this same split. The GPU command processor is a small microcontroller (not a full CPU) that decodes command buffers and configures the SMs. Google's TPU v1 similarly has a minimal host interface — the systolic array does the real work. The question "CPU vs fixed-function control" is a fundamental accelerator design tradeoff: flexibility vs area efficiency.
+
+---
+
+## 0.7 The Design Spectrum: Five Tiers of Accelerator
 
 Google's [CFU-Playground](https://github.com/google/CFU-Playground) built four tiers of ML accelerator on FPGAs. Each tier maps to a concept from real GPU architecture:
 
@@ -216,7 +270,7 @@ Our tutorial maps to these tiers:
 
 ---
 
-## 0.6 Selective Lowering: The GPU Execution Model
+## 0.8 Selective Lowering: The GPU Execution Model
 
 When PyTorch executes `y = model(x)`, it doesn't ship the entire Python program to the GPU. It walks the computation graph, finds operations the GPU can accelerate (matmul, conv2d, attention), and *lowers* only those to GPU kernels. Everything else stays on the CPU.
 
@@ -240,7 +294,7 @@ On a GPU, the answer is almost always "yes" for large tensor operations because 
 
 ---
 
-## 0.7 The Full Stack: GPU vs. Your System
+## 0.9 The Full Stack: GPU vs. Your System
 
 Side by side, layer for layer:
 
@@ -258,12 +312,12 @@ Every layer exists in both systems. Yours is smaller, simpler, and fully open �
 
 ---
 
-## 0.8 Checkpoint
+## 0.10 Checkpoint
 
 Before moving to Unit 1, you should be able to:
 
 - [ ] Explain the host/device split and why it exists (specialization vs. generality)
-- [ ] Name the GPU analog for each component in your system (UART=PCIe, CFU=shader core, BSRAM=VRAM, VexRiscv firmware=GPU driver)
+- [ ] Name the GPU analog for each component in your system (host Python=driver, UART=PCIe, VexRiscv firmware=command processor, CFU=shader core, BSRAM=shared memory)
 - [ ] Articulate why offloading a single MAC over UART is like launching a GPU kernel that does one multiply — technically correct but catastrophically inefficient
 - [ ] Explain selective lowering: the host runs the model, only specific operations go to the device
 - [ ] Identify at least two ways your system differs from a real GPU beyond scale
@@ -277,7 +331,7 @@ Before moving to Unit 1, you should be able to:
 - **tinygrad source:** `tinygrad/engine/schedule.py` — the scheduler that decides what to lower and what to fuse.
 - **Blog:** Fabien Sanglard, ["How GPUs Work"](https://fabiensanglard.net/gpu/index.html) — visual walkthrough of the GPU pipeline from command queue to pixel output.
 - **Paper:** Jouppi et al., ["In-Datacenter Performance Analysis of a Tensor Processing Unit"](https://arxiv.org/abs/1704.04760) (2017) — Google's TPU paper. Section 2 describes the host/device split for TPUs. Compare their systolic array to what you'll build in Unit 5.
-- **Blog:** Conal Rafferty, ["A Trip Through the Graphics Pipeline"](https://fgiesen.wordpress.com/2011/07/09/a-trip-through-the-graphics-pipeline-2011-index/) — deep dive into GPU pipeline stages. The command processor section maps directly to your VexRiscv firmware.
+- **Blog:** Fabian Giesen, ["A Trip Through the Graphics Pipeline"](https://fgiesen.wordpress.com/2011/07/09/a-trip-through-the-graphics-pipeline-2011-index/) — deep dive into GPU pipeline stages. The command processor section maps directly to your VexRiscv firmware.
 - **Reference:** RISC-V ISA Manual, Section 2.2 (Base Instruction Formats) — the R-type encoding you'll use for custom instructions in Unit 1.
 
 ---

@@ -1,0 +1,23 @@
+.{
+    .name = .accel,
+    .version = "0.0.0",
+    .dependencies = .{
+        .serial = .{
+            .url = "https://github.com/ZigEmbeddedGroup/serial/tarball/master",
+            .hash = "serial-0.0.1-PoeRzF60AAAN8Iu0yXTIX-t3DVzsnmN7vWHKM2HA2Zbq",
+        },
+        .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/tarball/main",
+            .hash = "libxev-0.0.0-86vtc689EwAjQWysidPm9NKkAwwUNByiE3kZTg_xu0Hp",
+        },
+    },
+    .fingerprint = 0x5dfc36e5903e5a3f,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "driver",
+        "firmware",
+        "shared",
+    },
+}

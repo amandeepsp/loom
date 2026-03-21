@@ -1,0 +1,28 @@
+:name: Accel CFU Simulation
+:description: LiteX VexRiscv + Verilated MAC4 CFU
+
+using sysbus
+mach create "accel"
+machine LoadPlatformDescription @sim/accel.repl
+
+# Disable strict CSR validation so the VexRiscv CfuPlugin enable
+# register (csrw 0xBC0) doesn't trap.
+cpu0 CSRValidation 0
+
+# Load the Verilated CFU shared library.
+cpu0.cfu0 SimulationFilePathLinux @sim/cfu/build/libVtop.so
+
+# UART: expose as TCP socket so the driver can connect via socat.
+emulation CreateServerSocketTerminal 3456 "uart_term"
+connector Connect uart uart_term
+
+showAnalyzer uart
+
+$elf?=@zig-out/bin/firmware
+
+macro reset
+"""
+    sysbus LoadELF $elf
+"""
+
+runMacro $reset

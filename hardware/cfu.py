@@ -1,4 +1,13 @@
-from amaranth import Array, Elaboratable, Module, ResetSignal, Signal
+from amaranth import (
+    Array,
+    ClockDomain,
+    ClockSignal,
+    Elaboratable,
+    Module,
+    ResetSignal,
+    Signal,
+    signed,
+)
 from amaranth.build import Platform
 
 
@@ -31,12 +40,16 @@ class Instruction(Elaboratable):
         self.output = Signal(32)
         self.start = Signal()
         self.done = Signal()
+        self.in0s = Signal(signed(32))
+        self.in1s = Signal(signed(32))
 
     def signal_done(self, m):
         m.d.comb += self.done.eq(1)
 
     def elaborate(self, platform: Platform):
-        raise NotImplementedError()
+        m = Module()
+        m.d.comb += [self.in0s.eq(self.in0), self.in1s.eq(self.in1)]
+        return m
 
 
 class _FallbackInstruction(Instruction):
@@ -46,7 +59,7 @@ class _FallbackInstruction(Instruction):
     """
 
     def elaborate(self, platform: Platform):
-        m = Module()
+        m = super().elaborate(platform)
         m.d.comb += self.output.eq(self.in0)
         m.d.comb += self.done.eq(1)
         return m
@@ -86,7 +99,8 @@ class Cfu(Elaboratable):
                 self.rsp_valid,
                 self.rsp_ready,
                 self.rsp_out,
-                self.reset,
+                # self.reset is exposed as the sync domain reset via
+                # ClockSignal/ResetSignal in the convert() ports list.
             ]
             + self.lram_addr
             + self.lram_data
@@ -146,6 +160,11 @@ class Cfu(Elaboratable):
 
         """
         m = Module()
+        # Name the sync domain reset "reset" (not default "rst") so LiteX
+        # connects its system reset to the right port. (CFU-Playground #110)
+        cd = ClockDomain("sync")
+        cd.rst = self.reset
+        m.domains += cd
         # Internal Wiring
         funct3 = Signal(3)
         funct7 = Signal(7)
@@ -166,6 +185,11 @@ class Cfu(Elaboratable):
             m.d.comb += instruction_outputs[i].eq(instruction.output)
             m.d.comb += instruction_dones[i].eq(instruction.done)
             m.d.comb += instruction.start.eq(instruction_starts[i])
+            m.d.comb += [
+                instruction.in0.eq(self.cmd_in0),
+                instruction.in1.eq(self.cmd_in1),
+                instruction.funct7.eq(funct7),
+            ]
 
         def check_instruction_done():
             with m.If(current_function_done):
@@ -210,12 +234,5 @@ class Cfu(Elaboratable):
                 m.d.comb += self.rsp_out.eq(stored_output)
                 with m.If(self.rsp_ready):
                     m.next = "WAIT_CMD"
-
-        for instruction in instructions:
-            m.d.comb += [
-                instruction.in0.eq(self.cmd_in0),
-                instruction.in1.eq(self.cmd_in1),
-                instruction.funct7.eq(funct7),
-            ]
 
         return m

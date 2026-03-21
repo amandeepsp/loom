@@ -1,0 +1,31 @@
+// Renode platform description for Accel LiteX SoC (simulation).
+//
+// Memory map and CSR addresses match build/sim/csr.json produced by sim.py.
+// If you re-run sim.py with different peripherals, re-check these addresses.
+
+rom: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x00020000
+
+sram: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x00002000
+
+main_ram: Memory.MappedMemory @ sysbus 0x40000000
+    size: 0x00800000
+
+cpu0: CPU.VexRiscv @ sysbus
+    cpuType: "rv32im_zicsr_zifencei"
+
+// ctrl CSR base: 0xF0000000
+ctrl: Miscellaneous.LiteX_SoC_Controller_CSR32 @ { sysbus 0xF0000000 }
+
+// timer0 CSR base: 0xF0000800  —  IRQ 1
+timer0: Timers.LiteX_Timer_CSR32 @ { sysbus 0xF0000800 }
+    frequency: 48000000
+    -> cpu0@1
+
+// uart CSR base: 0xF0001000  —  IRQ 0
+uart: UART.LiteX_UART @ { sysbus 0xF0001000 }
+    -> cpu0@0
+
+// Verilated CFU co-simulation peripheral, attached to cpu0.
+cfu0: CoSimulated.CoSimulatedCFU @ cpu0 0

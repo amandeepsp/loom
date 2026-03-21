@@ -2,8 +2,8 @@
 build/
 top.v
 *.vcd
-firmware/.zig-cache/
-firmware/zig-out/
+.zig-cache/
+zig-out/
 firmware/crt0.o
 
 # Python
@@ -15,4 +15,5 @@ __pycache__/
 *.swp
 *~
 
-surfur
+# Simulation build artifacts
+sim/cfu/build/

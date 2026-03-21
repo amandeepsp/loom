@@ -20,44 +20,54 @@ Host PC ──UART──► VexRiscv firmware ──CUSTOM_0 insn──► CFU h
 |-------------|----------------|-----------------------------------------------|
 | `hardware/` | Python/Amaranth | CFU RTL — instruction definitions, SIMD MAC4  |
 | `firmware/` | Zig            | Bare-metal firmware: UART link protocol, CFU driver |
-| `host/`     | Python          | Host-side client that talks to the simulator    |
+| `driver/`   | Zig            | Host-side native driver (serial)               |
+| `shared/`   | Zig            | Wire protocol + CFU inline asm (firmware & driver) |
+| `sim/`      | C++/Renode     | Renode simulation: platform def, Verilated CFU |
 | `top.v`     | Verilog (generated) | CFU Verilog output consumed by LiteX       |
 
-## Quick Start (Sim)
+## Quick Start (Renode Simulation)
+
+No FPGA needed. The full SoC runs in Renode with the actual CFU Verilog
+co-simulated via Verilator.
+
+Prerequisites: `renode`, `verilator`, `cmake`, `zig`, `uv`, a RISC-V GCC toolchain.
 
 ```bash
 # 1. Generate the Verilog CFU
-cd hardware && python top.py && cd ..
+uv run python hardware/top.py
 
-# 2. Make sure the LiteX sim build artifacts exist
-#    Needed by firmware/build.zig:
-#    - build/sim/csr.json
-#    - build/sim/software/bios/crt0.o
+# 2. Build LiteX SoC metadata (csr.json + crt0.o)
+uv run python sim/sim.py
 
-# 3. Build the firmware
-cd firmware && zig build && cd ..   # defaults to -Dbuild-dir=../build/sim
+# 3. Build the Verilated CFU shared library
+mkdir -p sim/cfu/build && cd sim/cfu/build
+cmake .. && make -j$(nproc)
+cd ../../..
 
-# 4. Run end-to-end test through the LiteX simulator
-uv run python host/client.py --test -v
+# 4. Build firmware
+zig build firmware
 
-# 5. Run the NumPy example through the simulator
-uv run python host/numpy_sim.py
+# 5. Boot in Renode
+renode --disable-xwt --console -e "include @sim/accel.resc; start"
+# → UART prints "[link] ready"
 ```
 
-If `build/sim/software/bios/crt0.o` is missing, rebuild it explicitly:
+To run the driver E2E test against the simulation (in a second terminal):
 
 ```bash
-riscv64-elf-gcc -c -march=rv32i2p0_m -mabi=ilp32 -D__vexriscv__ \
-  "$(python -c "import litex.soc.cores.cpu.vexriscv, os; print(os.path.join(os.path.dirname(litex.soc.cores.cpu.vexriscv.__file__), 'crt0.S'))")" \
-  -o build/sim/software/bios/crt0.o
+# Bridge Renode's TCP UART (port 3456) to a PTY
+socat pty,raw,echo=0,link=/tmp/renode-uart tcp:localhost:3456 &
+
+# Run the driver — ping + mac4 [1,2,3,4]·[5,6,7,8] = 70
+zig build run -- /tmp/renode-uart
 ```
 
-The firmware build reads `csr.json` and `crt0.o` directly from the LiteX build
-directory, so CSR addresses stay in sync with the SoC.
+The firmware build reads `csr.json` and `crt0.o` from the LiteX build
+directory (`build/sim/` by default), so CSR addresses stay in sync with the SoC.
 
 ## Build And Test On Tang Nano 20K
 
-Prerequisites: add `oss-cad-suite` to `PATH`.
+Prerequisites: `oss-cad-suite` on `PATH`.
 
 ```bash
 # 1. Build the LiteX SoC for the board
@@ -68,17 +78,26 @@ uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
 # 2. Flash the bitstream
 uv run python -m litex_boards.targets.sipeed_tang_nano_20k --flash
 
-# 3. Build firmware targeting the hardware SoC
-cd firmware && zig build -Dbuild-dir=../build/sipeed_tang_nano_20k && cd ..
+# 3. (Optional) Reset the board
+openFPGALoader --board tangnano20k --reset
 
-# 4. Run tests on the real FPGA (resets board, uploads firmware, runs tests)
-uv run python host/client.py --test --serial /dev/ttyUSB1 -v
+# 4. Build firmware targeting the hardware SoC
+zig build firmware -Dbuild-dir=build/sipeed_tang_nano_20k
+
+# 5. Upload firmware via serial boot
+uv run litex_term /dev/ttyUSB1 --kernel zig-out/bin/firmware.bin
+# → wait for "serialboot" prompt, then firmware loads and prints "[link] ready"
+
+# 6. Run driver against the real FPGA
+zig build run -- /dev/ttyUSB1
 ```
 
 ## Notes
 
-- `host/client.py` supports both `SimLink` and `SerialLink`.
-- The response header includes `cycles_lo`, which is reserved for lightweight timing/telemetry.
+- The response header includes `cycles_lo`, reserved for lightweight timing/telemetry.
+- The driver accepts a port path as its first argument (defaults to `/dev/ttyUSB1`).
+- For simulation, the Verilated CFU runs the actual RTL cycle-accurately — any
+  hardware bug will reproduce without the FPGA.
 
 ## Docs
 

@@ -1,5 +1,4 @@
 /// UART driver for LiteX SoC.
-
 const csr = @import("csr");
 const mmio = @import("mmio.zig");
 

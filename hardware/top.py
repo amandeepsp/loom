@@ -6,16 +6,20 @@ Datapath:
   Epilogue requantizes INT32→INT8, stores results for CPU readback
 """
 
+import argparse
+import re
+from dataclasses import dataclass
+
 from amaranth import ClockSignal, Module, ResetSignal, Signal, signed, unsigned
 from amaranth.back.verilog import convert
 from amaranth.lib import wiring
 
-from cfu import Cfu
-from scratchpad import DmaWriteSignature, DoubleScratchpad
-from os_pe_array import OutputStationaryPEArray
-from sequencer import Sequencer
-from epilogue import Epilogue, PerChannelStore
-from decoder.instructions import (
+from hardware.cfu import Cfu
+from hardware.memory.scratchpad import DmaWriteSignature, DoubleScratchpad
+from hardware.systolic.os_pe_array import OutputStationaryPEArray
+from hardware.control.sequencer import Sequencer
+from hardware.epilogue.epilogue import Epilogue, PerChannelStore
+from hardware.decoder.instructions import (
     ComputeStartInstruction,
     ComputeWaitInstruction,
     EpiParamInstruction,
@@ -24,23 +28,52 @@ from decoder.instructions import (
 )
 
 
-class Top(Cfu):
-    ROWS = 4
-    COLS = 4
-    STORE_DEPTH = 512
+@dataclass(frozen=True)
+class TopConfig:
+    rows: int = 8
+    cols: int = 8
+    store_depth: int = 512
+    in_width: int = 8
+    acc_width: int = 32
 
-    def __init__(self):
+    @property
+    def act_line_width(self) -> int:
+        return self.rows * self.in_width
+
+    @property
+    def wgt_line_width(self) -> int:
+        return self.cols * self.in_width
+
+    @property
+    def num_results(self) -> int:
+        return self.rows * self.cols
+
+
+class Top(Cfu):
+    def __init__(self, config: TopConfig | None = None):
         super().__init__()
-        addr_bits = (self.STORE_DEPTH - 1).bit_length()
+        self.config = config or TopConfig()
+        addr_bits = (self.config.store_depth - 1).bit_length()
 
         # DMA write ports — exposed on Verilog boundary for SoC adapter
-        sig = DmaWriteSignature(addr_width=addr_bits)
-        self.dma_act = sig.create(path=("dma_act",))
-        self.dma_wgt = sig.create(path=("dma_wgt",))
+        self.rows = self.config.rows
+        self.cols = self.config.cols
+        sig_act = DmaWriteSignature(addr_width=addr_bits, data_width=self.config.act_line_width)
+        sig_wgt = DmaWriteSignature(addr_width=addr_bits, data_width=self.config.wgt_line_width)
+        self.dma_act = sig_act.create(path=("dma_act",))
+        self.dma_wgt = sig_wgt.create(path=("dma_wgt",))
 
         self.ports += [
             self.dma_act.addr, self.dma_act.data, self.dma_act.en,
             self.dma_wgt.addr, self.dma_wgt.data, self.dma_wgt.en,
+        ]
+        self.seq_state_debug = Signal(8, name="seq_state_debug")
+        self.seq_busy_debug = Signal(name="seq_busy_debug")
+        self.error_warn_debug = Signal(name="error_warn_debug")
+        self.ports += [
+            self.seq_state_debug,
+            self.seq_busy_debug,
+            self.error_warn_debug,
         ]
 
     def elab_instructions(self, m):
@@ -61,25 +94,41 @@ class Top(Cfu):
     def elaborate(self, platform):
         m = super().elaborate(platform)
 
-        rows, cols = self.ROWS, self.COLS
+        rows, cols = self.config.rows, self.config.cols
 
         # === Submodules ===================================================
 
-        self.act_scratch = act_sp = DoubleScratchpad(depth=self.STORE_DEPTH, line_shape=32)
-        self.wgt_scratch = wgt_sp = DoubleScratchpad(depth=self.STORE_DEPTH, line_shape=32)
+        self.act_scratch = act_sp = DoubleScratchpad(
+            depth=self.config.store_depth, line_shape=self.config.act_line_width
+        )
+        self.wgt_scratch = wgt_sp = DoubleScratchpad(
+            depth=self.config.store_depth, line_shape=self.config.wgt_line_width
+        )
         m.submodules.act_scratch = act_sp
         m.submodules.wgt_scratch = wgt_sp
 
-        self.array = array = OutputStationaryPEArray(rows, cols)
+        self.array = array = OutputStationaryPEArray(
+            rows, cols, self.config.in_width, self.config.acc_width
+        )
         m.submodules.array = array
 
-        self.seq = seq = Sequencer(rows=rows, cols=cols, scratchpad_depth=self.STORE_DEPTH)
+        self.seq = seq = Sequencer(
+            rows=rows,
+            cols=cols,
+            in_width=self.config.in_width,
+            acc_width=self.config.acc_width,
+            scratchpad_depth=self.config.store_depth,
+        )
         m.submodules.seq = seq
 
-        self.epi = epi = Epilogue(num_results=rows * cols)
+        self.epi = epi = Epilogue(
+            num_results=self.config.num_results,
+            acc_width=self.config.acc_width,
+            out_width=self.config.in_width,
+        )
         m.submodules.epi = epi
 
-        self.params = params = PerChannelStore(depth=rows * cols)
+        self.params = params = PerChannelStore(depth=self.config.num_results)
         m.submodules.params = params
 
         # Aliases for global config (owned by ConfigInstruction)
@@ -167,6 +216,12 @@ class Top(Cfu):
             m.d.sync += seq_done_latch.eq(0)
         m.d.comb += self.i_compute_wait.seq_done.eq(seq.done | seq_done_latch)
 
+        m.d.comb += [
+            self.seq_state_debug.eq(seq.state_debug),
+            self.seq_busy_debug.eq(seq.busy_debug),
+            self.error_warn_debug.eq(0),
+        ]
+
         # EPI_PARAM → PerChannelStore
         i_ep = self.i_epi_param
         m.d.comb += [
@@ -186,13 +241,38 @@ class Top(Cfu):
         return m
 
 
-if __name__ == "__main__":
-    import re
+def build_config_from_args(args: argparse.Namespace) -> TopConfig:
+    return TopConfig(
+        rows=args.cfu_rows,
+        cols=args.cfu_cols,
+        store_depth=args.cfu_store_depth,
+        in_width=args.cfu_in_width,
+        acc_width=args.cfu_acc_width,
+    )
 
-    top = Top()
+
+def write_verilog(config: TopConfig, output: str) -> None:
+    top = Top(config)
     ports = top.ports + [ClockSignal("sync"), ResetSignal("sync")]
     v = convert(top, name="Cfu", ports=ports, strip_internal_attrs=True)
     v = re.sub(r"^.*dump_module.*\n", "", v, flags=re.MULTILINE)
-    with open("top.v", "w") as f:
+    with open(output, "w") as f:
         f.write(v)
-    print("Wrote top.v")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate CFU top-level Verilog.")
+    parser.add_argument("--cfu-rows", default=8, type=int, help="CFU array row count.")
+    parser.add_argument("--cfu-cols", default=8, type=int, help="CFU array column count.")
+    parser.add_argument("--cfu-store-depth", default=512, type=int, help="CFU scratchpad depth.")
+    parser.add_argument("--cfu-in-width", default=8, type=int, help="CFU activation and weight element width in bits.")
+    parser.add_argument("--cfu-acc-width", default=32, type=int, help="CFU accumulator width in bits.")
+    parser.add_argument("--output", default="top.v", help="Output Verilog path.")
+    args = parser.parse_args()
+
+    write_verilog(build_config_from_args(args), args.output)
+    print(f"Wrote {args.output}")
+
+
+if __name__ == "__main__":
+    main()

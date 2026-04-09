@@ -56,6 +56,8 @@ class Sequencer(wiring.Component):
         ports["done"] = Out(1)
         ports["first"] = In(1)
         ports["last"] = In(1)
+        ports["state_debug"] = Out(8)
+        ports["busy_debug"] = Out(1)
 
         # Scratchpad interface
         ports["act_rd_addr"] = Out(scratchpad_addr_width)
@@ -100,7 +102,7 @@ class Sequencer(wiring.Component):
         # Epilogue drain counter
         epi_counter = Signal(range(num_results))
 
-        with m.FSM():
+        with m.FSM(name="fsm") as fsm:
             with m.State("IDLE"):
                 m.d.comb += self.done.eq(0)
                 with m.If(self.start):
@@ -171,5 +173,19 @@ class Sequencer(wiring.Component):
                 m.d.comb += self.done.eq(1)
                 with m.If(~self.start):
                     m.next = "IDLE"
+
+        m.d.comb += [
+            self.state_debug.eq(
+                fsm.ongoing("IDLE") * 0
+                | fsm.ongoing("PRIME") * 1
+                | fsm.ongoing("FEED") * 2
+                | fsm.ongoing("FLUSH") * 3
+                | fsm.ongoing("EPILOGUE") * 4
+                | fsm.ongoing("EPILOGUE_WAIT") * 5
+                | fsm.ongoing("DONE") * 6
+                | fsm.ongoing("WAIT_START_DEASSERT") * 7
+            ),
+            self.busy_debug.eq(~fsm.ongoing("IDLE")),
+        ]
 
         return m

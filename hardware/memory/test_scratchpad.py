@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from scratchpad import DoubleScratchpad
+from hardware.memory.scratchpad import DoubleScratchpad
 
 
 class TestDoubleScratchpad:

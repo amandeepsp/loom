@@ -9,23 +9,38 @@ rom: Memory.MappedMemory @ sysbus 0x00000000
 sram: Memory.MappedMemory @ sysbus 0x10000000
     size: 0x00002000
 
+// LiteDRAM-backed main_ram (64 MB — MT48LC16M16 SDR SDRAM).
+// Model is pre-loaded into DRAM; DMA readers pull tiles to scratchpads.
 main_ram: Memory.MappedMemory @ sysbus 0x40000000
-    size: 0x00800000
+    size: 0x04000000
 
 cpu0: CPU.VexRiscv @ sysbus
     cpuType: "rv32im_zicsr_zifencei"
 
-// ctrl CSR base: 0xF0000000
-ctrl: Miscellaneous.LiteX_SoC_Controller_CSR32 @ { sysbus 0xF0000000 }
+// act_dma CSR base: 0xF0000000 (location 0, 0x800 paging)
+// Registers: base(0x00) length(0x04) enable(0x08) done(0x0C) loop(0x10) offset(0x14)
+act_dma: Memory.MappedMemory @ sysbus 0xF0000000
+    size: 0x800
 
-// timer0 CSR base: 0xF0000800  —  IRQ 1
-timer0: Timers.LiteX_Timer_CSR32 @ { sysbus 0xF0000800 }
+// ctrl CSR base: 0xF0000800 (location 1)
+ctrl: Miscellaneous.LiteX_SoC_Controller_CSR32 @ { sysbus 0xF0000800 }
+
+// sdram CSR base: 0xF0001000 (location 2)
+sdram: Memory.MappedMemory @ sysbus 0xF0001000
+    size: 0x800
+
+// timer0 CSR base: 0xF0001800 (location 3) —  IRQ 1
+timer0: Timers.LiteX_Timer_CSR32 @ { sysbus 0xF0001800 }
     frequency: 48000000
     -> cpu0@1
 
-// uart CSR base: 0xF0001000  —  IRQ 0
-uart: UART.LiteX_UART @ { sysbus 0xF0001000 }
+// uart CSR base: 0xF0002000 (location 4) —  IRQ 0
+uart: UART.LiteX_UART @ { sysbus 0xF0002000 }
     -> cpu0@0
+
+// wgt_dma CSR base: 0xF0002800 (location 5)
+wgt_dma: Memory.MappedMemory @ sysbus 0xF0002800
+    size: 0x800
 
 // Verilated CFU co-simulation peripheral, attached to cpu0.
 cfu0: CoSimulated.CoSimulatedCFU @ cpu0 0

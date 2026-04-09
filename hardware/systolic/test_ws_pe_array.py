@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from ws_pe_array import WeightStationaryPEArray
+from hardware.systolic.ws_pe_array import WeightStationaryPEArray
 
 
 class TestWeightStationaryPEArray:

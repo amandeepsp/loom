@@ -22,7 +22,7 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["hardware", "hardware/systolic", "hardware/memory", "hardware/epilogue"]
-pythonpath = ["hardware", "hardware/systolic", "hardware/memory", "hardware/epilogue"]
+pythonpath = ["."]
 
 [tool.ty.src]
 root = "hardware"

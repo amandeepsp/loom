@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from sequencer import Sequencer
+from hardware.control.sequencer import Sequencer
 
 
 def pack_act(vals):

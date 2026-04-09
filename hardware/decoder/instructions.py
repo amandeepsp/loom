@@ -1,6 +1,6 @@
 from amaranth import signed
 from amaranth.lib.wiring import In, Out
-from cfu import Instruction
+from hardware.cfu import Instruction
 
 
 class ComputeStartInstruction(Instruction):

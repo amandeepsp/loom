@@ -87,6 +87,9 @@ class Cfu(Elaboratable):
         self.rsp_ready = Signal(name="rsp_ready")
         self.rsp_out = Signal(32, name="rsp_payload_outputs_0")
         self.reset = Signal(name="reset")
+        self.cfu_state_debug = Signal(8, name="cfu_state_debug")
+        self.cfu_instr_debug = Signal(3, name="cfu_instr_debug")
+        self.cfu_busy_debug = Signal(name="cfu_busy_debug")
 
         self.lram_addr = [Signal(32, name=f"port{i}_addr") for i in range(4)]
         self.lram_data = [Signal(32, name=f"port{i}_din") for i in range(4)]
@@ -101,6 +104,9 @@ class Cfu(Elaboratable):
                 self.rsp_valid,
                 self.rsp_ready,
                 self.rsp_out,
+                self.cfu_state_debug,
+                self.cfu_instr_debug,
+                self.cfu_busy_debug,
                 # self.reset is exposed as the sync domain reset via
                 # ClockSignal/ResetSignal in the convert() ports list.
             ]
@@ -203,7 +209,7 @@ class Cfu(Elaboratable):
             with m.Else():
                 m.next = "WAIT_INSTRUCTION"
 
-        with m.FSM():
+        with m.FSM(name="fsm") as fsm:
             with m.State("WAIT_CMD"):
                 # We're waiting for a command from the CPU.
                 m.d.comb += current_function_id.eq(funct3)
@@ -232,5 +238,20 @@ class Cfu(Elaboratable):
                 m.d.comb += self.rsp_out.eq(stored_output)
                 with m.If(self.rsp_ready):
                     m.next = "WAIT_CMD"
+
+        m.d.comb += [
+            self.cfu_state_debug.eq(
+                fsm.ongoing("WAIT_CMD") * 0
+                | fsm.ongoing("WAIT_INSTRUCTION") * 1
+                | fsm.ongoing("WAIT_TRANSFER") * 2
+            ),
+            self.cfu_busy_debug.eq(
+                fsm.ongoing("WAIT_INSTRUCTION")
+                | fsm.ongoing("WAIT_TRANSFER")
+            ),
+        ]
+
+        with m.If(self.cmd_valid & self.cmd_ready):
+            m.d.sync += self.cfu_instr_debug.eq(funct3)
 
         return m

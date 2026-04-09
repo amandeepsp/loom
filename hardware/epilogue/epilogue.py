@@ -16,7 +16,7 @@ from amaranth.lib.memory import Memory
 from amaranth.lib.wiring import In, Out, Component
 from amaranth.utils import ceil_log2
 
-from quant import SRDHM, RoundingDividebyPOT
+from hardware.epilogue.quant import SRDHM, RoundingDividebyPOT
 
 
 class Epilogue(Component):

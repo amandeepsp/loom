@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from skew import SkewBuffer
+from hardware.systolic.skew import SkewBuffer
 
 
 class TestSkewBuffer:

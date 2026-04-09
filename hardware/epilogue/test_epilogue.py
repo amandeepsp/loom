@@ -1,7 +1,7 @@
 import pytest
 from amaranth.sim import Simulator
 
-from epilogue import Epilogue, PerChannelStore, PerChannelWriteSelect
+from hardware.epilogue.epilogue import Epilogue, PerChannelStore, PerChannelWriteSelect
 
 INT32_MIN = -(1 << 31)
 INT32_MAX = (1 << 31) - 1

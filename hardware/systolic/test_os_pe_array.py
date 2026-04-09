@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from os_pe_array import OutputStationaryPEArray
+from hardware.systolic.os_pe_array import OutputStationaryPEArray
 
 
 class TestOutputStationaryPEArray:

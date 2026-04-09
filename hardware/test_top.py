@@ -6,9 +6,10 @@ Verifies: DMA fill → sequencer → array → epilogue → results.
 
 import numpy as np
 import pytest
+from amaranth.back.verilog import convert
 from amaranth.sim import Simulator
 
-from top import Top
+from hardware.top import Top, TopConfig
 
 INT32_MIN = -(1 << 31)
 INT32_MAX = (1 << 31) - 1
@@ -42,7 +43,7 @@ def ref_epilogue(acc, bias, multiplier, shift, offset, act_min, act_max):
 
 
 def pack_int8(vals):
-    """Pack list of int8 values into a 32-bit word (little-endian byte order)."""
+    """Pack list of int8 values into a little-endian word."""
     word = 0
     for i, v in enumerate(vals):
         word |= (v & 0xFF) << (8 * i)
@@ -116,7 +117,7 @@ class TestCfuTop:
                                   in0=0xDEADBEEF, in1=0)
             assert result == 0xDEADBEEF
 
-        dut = Top()
+        dut = Top(TopConfig(rows=4, cols=4))
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -125,7 +126,7 @@ class TestCfuTop:
 
     def test_submodules_exist(self):
         """All datapath submodules are instantiated."""
-        dut = Top()
+        dut = Top(TopConfig(rows=4, cols=4))
         Simulator(dut)
         assert dut.act_scratch is not None
         assert dut.wgt_scratch is not None
@@ -133,6 +134,20 @@ class TestCfuTop:
         assert dut.seq is not None
         assert dut.epi is not None
         assert dut.params is not None
+
+    def test_debug_ports_present_in_verilog(self):
+        """Generated Verilog keeps the board-facing debug ports stable."""
+        dut = Top(TopConfig(rows=4, cols=4))
+        v = convert(dut, name="Cfu", ports=dut.ports)
+        for name in [
+            "cfu_state_debug",
+            "cfu_instr_debug",
+            "cfu_busy_debug",
+            "seq_state_debug",
+            "seq_busy_debug",
+            "error_warn_debug",
+        ]:
+            assert name in v, f"missing port: {name}"
 
 
 class TestIntegration:
@@ -180,7 +195,7 @@ class TestIntegration:
         # wgt[k] = pack(B[k,0], B[k,1], B[k,2], B[k,3])
         wgt_words = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
 
-        dut = Top()
+        dut = Top(TopConfig(rows=4, cols=4))
 
         async def testbench(ctx):
             num_ch = ROWS * COLS
@@ -256,7 +271,7 @@ class TestIntegration:
         act_words = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
         wgt_words = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
 
-        dut = Top()
+        dut = Top(TopConfig(rows=4, cols=4))
 
         async def testbench(ctx):
             await dma_fill(ctx, dut.dma_act, act_words)

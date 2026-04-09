@@ -22,6 +22,11 @@ pub inline fn mac4(a: i32, b: i32) void {
     _ = cfu_op(0, 0, a, b);
 }
 
+/// MAC4 from the next words in the activation/filter local stores.
+pub inline fn mac4_next() void {
+    _ = cfu_op(0, 1, 0, 0);
+}
+
 pub inline fn set_input_offset(offset: i32) void {
     _ = cfu_op(2, 0, 0, offset);
 }
@@ -32,6 +37,26 @@ pub fn reset_accumulator() void {
 
 pub fn read_accumulator() i32 {
     return cfu_op(1, 0, 0x1, 0);
+}
+
+/// Write one packed 4xINT8 word into the filter store.
+pub inline fn write_filter_word(addr: u16, word: i32) void {
+    _ = cfu_op(2, 3, @as(i32, addr), word);
+}
+
+/// Write one packed 4xINT8 word into the activation store.
+pub inline fn write_activation_word(addr: u16, word: i32) void {
+    _ = cfu_op(2, 4, @as(i32, addr), word);
+}
+
+/// Prime the filter store read pointer for the next mac4_next burst.
+pub inline fn reset_filter_rptr() void {
+    _ = cfu_op(2, 6, 0, 0);
+}
+
+/// Rewind the activation store read pointer for the next output channel.
+pub inline fn reset_act_rptr() void {
+    _ = cfu_op(2, 7, 0, 0);
 }
 
 /// SRDHM: SaturatingRoundingDoubleHighMul.

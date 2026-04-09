@@ -2,8 +2,8 @@ from amaranth import Module, Signal, signed
 from amaranth.lib import wiring
 from amaranth.lib.wiring import In, Out
 
-from os_pe import OutputStationaryPE
-from skew import SkewBuffer
+from hardware.systolic.os_pe import OutputStationaryPE
+from hardware.systolic.skew import SkewBuffer
 
 
 class OutputStationaryPEArray(wiring.Component):

@@ -1,7 +1,7 @@
 import pytest
 from amaranth.sim import Simulator
 
-from epilogue import Epilogue
+from epilogue import Epilogue, PerChannelStore, PerChannelWriteSelect
 
 INT32_MIN = -(1 << 31)
 INT32_MAX = (1 << 31) - 1
@@ -263,4 +263,126 @@ class TestEpilogue:
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
         with sim.write_vcd("waves/test_epi_bias.vcd"):
+            sim.run()
+
+
+class TestPerChannelStore:
+    def test_write_and_read(self):
+        """Write bias/mult/shift for two channels, read them back."""
+        DEPTH = 4
+
+        async def testbench(ctx):
+            # Write channel 0: bias=100, mult=0x40000000, shift=3
+            for sel, val in [
+                (PerChannelWriteSelect.BIAS, 100),
+                (PerChannelWriteSelect.MULT, 0x40000000),
+                (PerChannelWriteSelect.SHIFT, 3),
+            ]:
+                ctx.set(dut.wr_addr, 0)
+                ctx.set(dut.wr_sel, sel)
+                ctx.set(dut.wr_data, val)
+                ctx.set(dut.wr_en, 1)
+                await ctx.tick()
+
+            # Write channel 1: bias=-50, mult=0x60000000, shift=5
+            for sel, val in [
+                (PerChannelWriteSelect.BIAS, -50),
+                (PerChannelWriteSelect.MULT, 0x60000000),
+                (PerChannelWriteSelect.SHIFT, 5),
+            ]:
+                ctx.set(dut.wr_addr, 1)
+                ctx.set(dut.wr_sel, sel)
+                ctx.set(dut.wr_data, val)
+                ctx.set(dut.wr_en, 1)
+                await ctx.tick()
+
+            ctx.set(dut.wr_en, 0)
+
+            # Read channel 0 (sync read: set addr, wait 1 cycle)
+            ctx.set(dut.rd_addr, 0)
+            await ctx.tick()
+            assert ctx.get(dut.bias) == 100
+            assert ctx.get(dut.multiplier) == 0x40000000
+            assert ctx.get(dut.shift) == 3
+
+            # Read channel 1
+            ctx.set(dut.rd_addr, 1)
+            await ctx.tick()
+            assert ctx.get(dut.bias) == -50
+            assert ctx.get(dut.multiplier) == 0x60000000
+            assert ctx.get(dut.shift) == 5
+
+        dut = PerChannelStore(depth=DEPTH)
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd("waves/test_param_store.vcd"):
+            sim.run()
+
+    def test_sequential_readout(self):
+        """Simulate sequencer drain: walk rd_addr 0..N-1, data arrives pipelined."""
+        DEPTH = 4
+        biases = [10, -20, 30, -40]
+
+        async def testbench(ctx):
+            # Load biases
+            for i, b in enumerate(biases):
+                ctx.set(dut.wr_addr, i)
+                ctx.set(dut.wr_sel, PerChannelWriteSelect.BIAS)
+                ctx.set(dut.wr_data, b)
+                ctx.set(dut.wr_en, 1)
+                await ctx.tick()
+            ctx.set(dut.wr_en, 0)
+
+            # Sequential read — addr presented cycle N, data valid cycle N+1
+            for i in range(DEPTH):
+                ctx.set(dut.rd_addr, i)
+                await ctx.tick()
+                assert ctx.get(dut.bias) == biases[i], \
+                    f"chan {i}: got {ctx.get(dut.bias)}, expected {biases[i]}"
+
+        dut = PerChannelStore(depth=DEPTH)
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd("waves/test_param_seq.vcd"):
+            sim.run()
+
+    def test_write_does_not_bleed(self):
+        """Writing one field doesn't corrupt other fields at the same address."""
+        DEPTH = 4
+
+        async def testbench(ctx):
+            # Write all three fields for channel 0
+            ctx.set(dut.wr_addr, 0)
+            ctx.set(dut.wr_sel, PerChannelWriteSelect.BIAS)
+            ctx.set(dut.wr_data, 42)
+            ctx.set(dut.wr_en, 1)
+            await ctx.tick()
+
+            ctx.set(dut.wr_sel, PerChannelWriteSelect.MULT)
+            ctx.set(dut.wr_data, 0x12345678)
+            await ctx.tick()
+
+            ctx.set(dut.wr_sel, PerChannelWriteSelect.SHIFT)
+            ctx.set(dut.wr_data, 7)
+            await ctx.tick()
+
+            # Overwrite just bias — mult and shift should survive
+            ctx.set(dut.wr_sel, PerChannelWriteSelect.BIAS)
+            ctx.set(dut.wr_data, 99)
+            await ctx.tick()
+            ctx.set(dut.wr_en, 0)
+
+            ctx.set(dut.rd_addr, 0)
+            await ctx.tick()
+            assert ctx.get(dut.bias) == 99
+            assert ctx.get(dut.multiplier) == 0x12345678
+            assert ctx.get(dut.shift) == 7
+
+        dut = PerChannelStore(depth=DEPTH)
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd("waves/test_param_bleed.vcd"):
             sim.run()

@@ -8,16 +8,18 @@ Pipeline: +bias (comb) -> SRDHM (1 reg stage) -> RDBPOT (comb)
 
 Latency: 1 cycle (SRDHM register). Throughput: 1 result/cycle after fill.
 """
+from amaranth.lib.enum import IntEnum
+from amaranth.lib.data import StructLayout
 
 from amaranth import Array, Module, Signal, signed, unsigned
-from amaranth.lib import wiring
-from amaranth.lib.wiring import In, Out
+from amaranth.lib.memory import Memory
+from amaranth.lib.wiring import In, Out, Component
 from amaranth.utils import ceil_log2
 
 from quant import SRDHM, RoundingDividebyPOT
 
 
-class Epilogue(wiring.Component):
+class Epilogue(Component):
     """Per-channel params (bias, multiplier, shift) must be presented on the
     input ports each cycle, synchronized with the data. The external wiring
     (top.py) is responsible for indexing into a param table using epi_index
@@ -134,5 +136,87 @@ class Epilogue(wiring.Component):
 
         # Readback - always active
         m.d.comb += self.out_data.eq(results[self.out_addr])
+
+        return m
+
+PerChannelParamLayout = StructLayout({
+    "bias": signed(18),
+    "multiplier": signed(32),
+    "shift": unsigned(5),
+})
+
+class PerChannelWriteSelect(IntEnum):
+    BIAS = 0x0
+    MULT = 0x1
+    SHIFT = 0x2
+
+
+class PerChannelStore(Component):
+    """Mem for per-channel epilogue params.
+
+    Write: CPU selects field via wr_sel, writes one entry at a time.
+    Read:  Sequencer drives rd_addr; data appears combinationally (same cycle).
+    """
+
+    def __init__(self, depth=16):
+        self.depth = depth
+        super().__init__({
+            # Write port (from CFU instruction)
+            "wr_addr": In(range(depth)),
+            "wr_data": In(signed(32)),
+            "wr_sel": In(PerChannelWriteSelect),
+            "wr_en": In(1),
+            # Read port (from sequencer — 1 cycle latency)
+            "rd_addr": In(range(depth)),
+            "bias": Out(signed(18)),
+            "multiplier": Out(signed(32)),
+            "shift": Out(unsigned(5)),
+        })
+
+    def elaborate(self, _platform):
+        m = Module()
+
+        bias_mem = Memory(shape=signed(18), depth=self.depth, init=[])
+        mult_mem = Memory(shape=signed(32), depth=self.depth, init=[])
+        shift_mem = Memory(shape=unsigned(5), depth=self.depth, init=[])
+        m.submodules.bias_mem = bias_mem
+        m.submodules.mult_mem = mult_mem
+        m.submodules.shift_mem = shift_mem
+
+        # Write ports — gate enable by wr_sel
+        wr_bias = bias_mem.write_port()
+        wr_mult = mult_mem.write_port()
+        wr_shift = shift_mem.write_port()
+
+        m.d.comb += [
+            wr_bias.addr.eq(self.wr_addr),
+            wr_bias.data.eq(self.wr_data),
+            wr_bias.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.BIAS)),
+
+            wr_mult.addr.eq(self.wr_addr),
+            wr_mult.data.eq(self.wr_data),
+            wr_mult.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.MULT)),
+
+            wr_shift.addr.eq(self.wr_addr),
+            wr_shift.data.eq(self.wr_data),
+            wr_shift.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.SHIFT)),
+        ]
+
+        # Read ports — combinational (same-cycle), aligned with sequencer epi_data
+        rd_bias = bias_mem.read_port(domain="comb")
+        rd_mult = mult_mem.read_port(domain="comb")
+        rd_shift = shift_mem.read_port(domain="comb")
+
+        m.d.comb += [
+            rd_bias.addr.eq(self.rd_addr),
+            rd_mult.addr.eq(self.rd_addr),
+            rd_shift.addr.eq(self.rd_addr),
+        ]
+
+        m.d.comb += [
+            self.bias.eq(rd_bias.data),
+            self.multiplier.eq(rd_mult.data),
+            self.shift.eq(rd_shift.data),
+        ]
 
         return m

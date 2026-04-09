@@ -9,14 +9,14 @@ class TestDoubleScratchpad:
 
         async def testbench(ctx):
             # Write 0xDEAD to addr 0, 0xBEEF to addr 1 (fill bank = A)
-            ctx.set(dut.wr_addr, 0)
-            ctx.set(dut.wr_data, 0xDEAD)
-            ctx.set(dut.wr_en, 1)
+            ctx.set(dut.wr.addr, 0)
+            ctx.set(dut.wr.data, 0xDEAD)
+            ctx.set(dut.wr.en, 1)
             await ctx.tick()
-            ctx.set(dut.wr_addr, 1)
-            ctx.set(dut.wr_data, 0xBEEF)
+            ctx.set(dut.wr.addr, 1)
+            ctx.set(dut.wr.data, 0xBEEF)
             await ctx.tick()
-            ctx.set(dut.wr_en, 0)
+            ctx.set(dut.wr.en, 0)
 
             # Swap: A becomes compute, B becomes fill
             ctx.set(dut.swap, 1)
@@ -44,11 +44,11 @@ class TestDoubleScratchpad:
 
         async def testbench(ctx):
             # Fill bank A with data
-            ctx.set(dut.wr_addr, 0)
-            ctx.set(dut.wr_data, 100)
-            ctx.set(dut.wr_en, 1)
+            ctx.set(dut.wr.addr, 0)
+            ctx.set(dut.wr.data, 100)
+            ctx.set(dut.wr.en, 1)
             await ctx.tick()
-            ctx.set(dut.wr_en, 0)
+            ctx.set(dut.wr.en, 0)
 
             # Swap: A=compute, B=fill
             ctx.set(dut.swap, 1)
@@ -56,11 +56,11 @@ class TestDoubleScratchpad:
             ctx.set(dut.swap, 0)
 
             # Write different value to same addr in fill bank (B)
-            ctx.set(dut.wr_addr, 0)
-            ctx.set(dut.wr_data, 999)
-            ctx.set(dut.wr_en, 1)
+            ctx.set(dut.wr.addr, 0)
+            ctx.set(dut.wr.data, 999)
+            ctx.set(dut.wr.en, 1)
             await ctx.tick()
-            ctx.set(dut.wr_en, 0)
+            ctx.set(dut.wr.en, 0)
 
             # Read from compute bank (A) — should still be 100
             ctx.set(dut.rd_addr, 0)
@@ -89,11 +89,11 @@ class TestDoubleScratchpad:
         async def testbench(ctx):
             # Fill bank A
             for i in range(4):
-                ctx.set(dut.wr_addr, i)
-                ctx.set(dut.wr_data, (i + 1) * 10)
-                ctx.set(dut.wr_en, 1)
+                ctx.set(dut.wr.addr, i)
+                ctx.set(dut.wr.data, (i + 1) * 10)
+                ctx.set(dut.wr.en, 1)
                 await ctx.tick()
-            ctx.set(dut.wr_en, 0)
+            ctx.set(dut.wr.en, 0)
 
             # Swap: A=compute, B=fill
             ctx.set(dut.swap, 1)
@@ -103,12 +103,12 @@ class TestDoubleScratchpad:
             # Simultaneously: read A (compute) and write B (fill)
             for i in range(4):
                 ctx.set(dut.rd_addr, i)       # read from A
-                ctx.set(dut.wr_addr, i)       # write to B
-                ctx.set(dut.wr_data, (i + 1) * 100)
-                ctx.set(dut.wr_en, 1)
+                ctx.set(dut.wr.addr, i)       # write to B
+                ctx.set(dut.wr.data, (i + 1) * 100)
+                ctx.set(dut.wr.en, 1)
                 await ctx.tick()
                 assert ctx.get(dut.rd_data) == (i + 1) * 10  # A unchanged
-            ctx.set(dut.wr_en, 0)
+            ctx.set(dut.wr.en, 0)
 
             # Swap: B=compute — verify B has the new data
             ctx.set(dut.swap, 1)

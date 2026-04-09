@@ -76,6 +76,7 @@ class Sequencer(wiring.Component):
 
         # Epilogue handshake — sequencer emits psums, external module consumes
         ports["epi_data"] = Out(signed(acc_width))
+        ports["epi_index"] = Out(range(rows * cols))
         ports["epi_first"] = Out(1)
         ports["epi_last"] = Out(1)
         ports["epi_done"] = In(1)
@@ -141,6 +142,7 @@ class Sequencer(wiring.Component):
 
             with m.State("EPILOGUE"):
                 m.d.comb += [
+                    self.epi_index.eq(epi_counter),
                     self.epi_first.eq(epi_counter == 0),
                     self.epi_last.eq(epi_counter == num_results - 1),
                     self.epi_data.eq(psum_array[epi_counter]),

@@ -4,6 +4,20 @@ from amaranth.lib.wiring import In, Out
 from amaranth.lib.memory import Memory
 
 
+class DmaWriteSignature(wiring.Signature):
+    """Write-only port for DMA → scratchpad fill.
+
+    Used by DoubleScratchpad as its grouped write port (``wr``).
+    """
+
+    def __init__(self, addr_width, data_width=32):
+        super().__init__({
+            "addr": In(addr_width),
+            "data": In(data_width),
+            "en":   In(1),
+        })
+
+
 class DoubleScratchpad(wiring.Component):
     """
     Double-buffered scratchpad backed by two SRAM banks.
@@ -25,9 +39,7 @@ class DoubleScratchpad(wiring.Component):
 
         super().__init__(
             {
-                "wr_addr": In(self.addr_bits),
-                "wr_data": In(line_shape),
-                "wr_en": In(1),
+                "wr": Out(DmaWriteSignature(addr_width=self.addr_bits, data_width=line_shape)),
                 "rd_addr": In(self.addr_bits),
                 "rd_data": Out(line_shape),
                 "swap": In(1),
@@ -54,12 +66,12 @@ class DoubleScratchpad(wiring.Component):
 
         # Write: gate enable by bank_sel — only fill bank accepts writes
         m.d.comb += [
-            wr_a.addr.eq(self.wr_addr),
-            wr_a.data.eq(self.wr_data),
-            wr_a.en.eq(self.wr_en & ~bank_sel),
-            wr_b.addr.eq(self.wr_addr),
-            wr_b.data.eq(self.wr_data),
-            wr_b.en.eq(self.wr_en & bank_sel),
+            wr_a.addr.eq(self.wr.addr),
+            wr_a.data.eq(self.wr.data),
+            wr_a.en.eq(self.wr.en & ~bank_sel),
+            wr_b.addr.eq(self.wr.addr),
+            wr_b.data.eq(self.wr.data),
+            wr_b.en.eq(self.wr.en & bank_sel),
         ]
 
         # Read: both banks read same address, mux output by bank_sel

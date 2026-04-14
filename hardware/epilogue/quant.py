@@ -75,5 +75,3 @@ class RoundingDividebyPOT(Elaboratable):
         rounding = Mux(remainder > threshold, 1, 0)
         m.d.comb += self.result.eq((self.x >> self.exponent) + rounding)
         return m
-
-

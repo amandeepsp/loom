@@ -238,7 +238,9 @@ fn tileStore(state: *PipeState, descs: []const ir.TensorDescriptor, inst: ir.Til
 
         const dst: [*]i8 = @ptrFromInt(dst_addr);
         for (0..inst.n_count) |col| {
-            const result_index = @as(i32, @intCast(row * array_cols + col));
+            const global_row: u32 = @as(u32, inst.m_offset) + @as(u32, @intCast(row));
+            const global_col: u32 = @as(u32, inst.n_offset) + @as(u32, @intCast(col));
+            const result_index: i32 = @intCast(global_row * @as(u32, array_cols) + global_col);
             dst[col] = @truncate(cfu.readResult(result_index));
         }
     }
@@ -267,7 +269,6 @@ fn setEpilogue(descs: []const ir.TensorDescriptor, inst: ir.SetEpilogue) ExecErr
         for (0..inst.n_count) |col| {
             const param_addr_offset = try mulU32(@as(u32, @intCast(col)), 4);
             const channel = @as(i32, @intCast(row * array_cols + col));
-
             cfu.writeEpiParam(.bias, channel, loadI32(try addU32(bias_base, param_addr_offset)));
             cfu.writeEpiParam(.multiplier, channel, loadI32(try addU32(mult_base, param_addr_offset)));
             cfu.writeEpiParam(.shift, channel, loadI32(try addU32(shift_base, param_addr_offset)));

@@ -26,6 +26,9 @@ dependencies = [
     "torchvision>=0.15.0",
     "numpy>=1.21.0",
     "torchao>=0.2.0",
+    "onnx>=1.21.0",
+    "onnxruntime>=1.23.2",
+    "tvm",
 ]
 
 [project.scripts]
@@ -53,3 +56,4 @@ pythondata-software-compiler_rt = { path = "../litex/pythondata-software-compile
 pythondata-software-picolibc = { path = "../litex/pythondata-software-picolibc", editable = true }
 pythondata-misc-tapcfg = { path = "../litex/pythondata-misc-tapcfg", editable = true }
 tinygrad = { path = "../tinygrad", editable = true }
+tvm = { path = "../tvm", editable = true }

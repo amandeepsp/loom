@@ -116,6 +116,8 @@ class Sequencer(wiring.Component):
                 m.d.comb += self.arr_psum_load.eq(1)
                 m.d.comb += self.act_rd_addr.eq(0)
                 m.d.comb += self.wgt_rd_addr.eq(0)
+                m.d.comb += self.act_swap.eq(self.first)
+                m.d.comb += self.wgt_swap.eq(self.first)
                 m.next = "FEED"
 
             with m.State("FEED"):

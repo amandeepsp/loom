@@ -8,12 +8,12 @@ Pipeline: +bias (comb) -> SRDHM (1 reg stage) -> RDBPOT (comb)
 
 Latency: 1 cycle (SRDHM register). Throughput: 1 result/cycle after fill.
 """
-from amaranth.lib.enum import IntEnum
-from amaranth.lib.data import StructLayout
 
 from amaranth import Array, Module, Signal, signed, unsigned
+from amaranth.lib.data import StructLayout
+from amaranth.lib.enum import IntEnum
 from amaranth.lib.memory import Memory
-from amaranth.lib.wiring import In, Out, Component
+from amaranth.lib.wiring import Component, In, Out
 from amaranth.utils import ceil_log2
 
 from hardware.epilogue.quant import SRDHM, RoundingDividebyPOT
@@ -37,29 +37,27 @@ class Epilogue(Component):
         self._acc_width = acc_width
         self._out_width = out_width
 
-        super().__init__({
-            # Input stream (from sequencer)
-            "data_in": In(signed(acc_width)),
-            "first_in": In(1),
-            "last_in": In(1),
-
-            # Per-channel params (indexed externally by epi_index)
-            "bias": In(signed(18)),
-            "multiplier": In(signed(32)),
-            "shift": In(unsigned(5)),
-
-            # Per-layer params (constant across tile)
-            "output_offset": In(signed(16)),
-            "activation_min": In(signed(out_width)),
-            "activation_max": In(signed(out_width)),
-
-            # Done signal back to sequencer
-            "done": Out(1),
-
-            # Result readback (active any time, outside pipeline)
-            "out_addr": In(ceil_log2(num_results)),
-            "out_data": Out(signed(out_width)),
-        })
+        super().__init__(
+            {
+                # Input stream (from sequencer)
+                "data_in": In(signed(acc_width)),
+                "first_in": In(1),
+                "last_in": In(1),
+                # Per-channel params (indexed externally by epi_index)
+                "bias": In(signed(18)),
+                "multiplier": In(signed(32)),
+                "shift": In(unsigned(5)),
+                # Per-layer params (constant across tile)
+                "output_offset": In(signed(16)),
+                "activation_min": In(signed(out_width)),
+                "activation_max": In(signed(out_width)),
+                # Done signal back to sequencer
+                "done": Out(1),
+                # Result readback (active any time, outside pipeline)
+                "out_addr": In(ceil_log2(num_results)),
+                "out_data": Out(signed(out_width)),
+            }
+        )
 
     def elaborate(self, _platform):
         m = Module()
@@ -117,8 +115,7 @@ class Epilogue(Component):
 
         # --- Result storage ---
         results = Array(
-            Signal(signed(self._out_width), name=f"epi_r_{i}")
-            for i in range(num)
+            Signal(signed(self._out_width), name=f"epi_r_{i}") for i in range(num)
         )
         write_idx = Signal(range(num))
 
@@ -139,11 +136,15 @@ class Epilogue(Component):
 
         return m
 
-PerChannelParamLayout = StructLayout({
-    "bias": signed(18),
-    "multiplier": signed(32),
-    "shift": unsigned(5),
-})
+
+PerChannelParamLayout = StructLayout(
+    {
+        "bias": signed(18),
+        "multiplier": signed(32),
+        "shift": unsigned(5),
+    }
+)
+
 
 class PerChannelWriteSelect(IntEnum):
     BIAS = 0x0
@@ -160,18 +161,20 @@ class PerChannelStore(Component):
 
     def __init__(self, depth=16):
         self.depth = depth
-        super().__init__({
-            # Write port (from CFU instruction)
-            "wr_addr": In(range(depth)),
-            "wr_data": In(signed(32)),
-            "wr_sel": In(PerChannelWriteSelect),
-            "wr_en": In(1),
-            # Read port (from sequencer — 1 cycle latency)
-            "rd_addr": In(range(depth)),
-            "bias": Out(signed(18)),
-            "multiplier": Out(signed(32)),
-            "shift": Out(unsigned(5)),
-        })
+        super().__init__(
+            {
+                # Write port (from CFU instruction)
+                "wr_addr": In(range(depth)),
+                "wr_data": In(signed(32)),
+                "wr_sel": In(PerChannelWriteSelect),
+                "wr_en": In(1),
+                # Read port (from sequencer — 1 cycle latency)
+                "rd_addr": In(range(depth)),
+                "bias": Out(signed(18)),
+                "multiplier": Out(signed(32)),
+                "shift": Out(unsigned(5)),
+            }
+        )
 
     def elaborate(self, _platform):
         m = Module()
@@ -192,11 +195,9 @@ class PerChannelStore(Component):
             wr_bias.addr.eq(self.wr_addr),
             wr_bias.data.eq(self.wr_data),
             wr_bias.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.BIAS)),
-
             wr_mult.addr.eq(self.wr_addr),
             wr_mult.data.eq(self.wr_data),
             wr_mult.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.MULT)),
-
             wr_shift.addr.eq(self.wr_addr),
             wr_shift.data.eq(self.wr_data),
             wr_shift.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.SHIFT)),

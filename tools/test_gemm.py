@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 """GEMM end-to-end tests: non-pipelined and pipelined variants.
 
 Usage:
@@ -16,7 +16,7 @@ import tempfile
 
 import numpy as np
 
-from tools.ir import (
+from shared.ir import (
     build_non_pipelined_gemm_program,
     build_pipelined_gemm_program,
     plan_memory,

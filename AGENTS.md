@@ -7,11 +7,14 @@ Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python (SoC integrat
 
 ### Directory Map
 
-- `hardware/` — Amaranth Python RTL: CFU datapath, systolic array, DMA scratchpads, epilogue
-- `firmware/` — Zig: bare-metal RISC-V (VexRISCV), UART protocol, CFU driver
-- `shared/` — Zig: wire protocol (`protocol.zig`), intermediate representation (`ir.zig`)
-- `host/` — Zig: native driver for serial communication with board
+- `hardware/` — Amaranth Python RTL: CFU datapath, systolic array, DMA scratchpads, sequencer, epilogue
+- `firmware/` — Zig: bare-metal RISC-V (VexRISCV), UART protocol, KIR interpreter, CFU/DMA drivers
+- `shared/` — Zig + Python: wire protocol (`protocol.zig`), IR definitions (`ir.zig`, `ir.py`)
+- `host/` — Zig: native driver + C API (`libaccel.so`) for serial communication with board
+- `tvm/` — Python: TVM Relax patterns, codegen, quantization utils, runtime bridge
+- `models/` — Python: int8 MNIST training, static quantization, ONNX export
 - `tools/` — Python: e2e test harness (`test_gemm.py`), IR bytecode builder (`ir.py`), LiteX flash utils
+- `docs/` — Architecture Decision Records
 - `top.v` — **Generated** Verilog (from `hardware/top.py`)
 
 ## Essential Commands
@@ -98,12 +101,24 @@ When tuning hardware, update all three: Justfile, firmware invocation, and e2e e
 
 - `shared/ir.zig`: Instruction format (load-weight, load-act, tile-mma, store, epilogue params, done).
   Program header: magic 0x4B495200 ("KIR\0"), version, tensor count, instruction count.
+- `shared/ir.py`: Python IR definitions and `ProgramBuilder` — single source of truth for bytecode format.
 - `shared/protocol.zig`: UART framing (CRC, control sequences).
 - `host/driver.zig`: Host-side serial communication + CFU instruction dispatch.
+- `host/c_api.zig`: C FFI surface (`libaccel.so`) — `accel_open`, `accel_exec`, `accel_write_mem`, etc.
 - `firmware/interpreter.zig`: Firmware IR interpreter (executes instructions, drives DMA, sequencer).
-- `tools/ir.py`: Python IR bytecode builder (used by `tools/test_gemm.py`).
+- `tools/ir.py`: Legacy IR bytecode builder (used by `tools/test_gemm.py`).
 
-Changing IR requires sync across `firmware/interpreter.zig`, `host/driver.zig`, `tools/ir.py`.
+Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, `firmware/interpreter.zig`, `host/driver.zig`.
+
+## TVM Integration
+
+- `tvm/patterns.py`: Relax DPL patterns for quantized matmul composites (QDQ format from ONNX).
+- `tvm/codegen.py`: Lowers partitioned regions to `call_dps_packed`, extracts composite constants.
+- `tvm/runtime.py`: `AccelRuntime` class — bridges TVM packed functions to `libaccel.so`, memory layout, KIR generation.
+- `tvm/quant_utils.py`: Derives per-channel epilogue params (bias, multiplier, shift) from scale/zero-point.
+- `tvm/relax.py`: `lower_pipeline()` — tiling → partitioning → codegen → lambda lift.
+
+The TVM integration is out-of-tree; it imports from `../tvm` (local Apache TVM build).
 
 ## Hardware Quirks
 

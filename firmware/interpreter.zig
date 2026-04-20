@@ -207,6 +207,12 @@ fn tileMma(state: *PipeState, inst: ir.TileMma) void {
     act_dma.wait();
     wgt_dma.wait();
 
+    // TODO: Investigate if hardware supports this
+    if (!inst.flags.last) {
+        act_dma.setLoop(true);
+        wgt_dma.setLoop(true);
+    }
+
     cfu.computeStart(inst.flags.first, inst.flags.last, inst.k_count);
     state.compute_pending = true;
 }

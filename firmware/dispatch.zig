@@ -1,7 +1,8 @@
-const link = @import("link.zig");
-const interpreter = @import("interpreter.zig");
-const memory = @import("memory.zig");
 const std = @import("std");
+const config = @import("config");
+const interpreter = @import("interpreter.zig");
+const link = @import("link.zig");
+const memory = @import("memory.zig");
 
 pub fn dispatch(header: link.Header) void {
     switch (header.op) {
@@ -24,16 +25,25 @@ fn ping(header: link.Header) void {
 }
 
 fn exec(header: link.Header) void {
-    var debug_buf: [8]u8 = undefined;
-    const cycles = interpreter.execute(header.payload_len, &debug_buf) catch |err| {
-        const code: link.StatusCode = switch (err) {
-            error.BadMagic => .bad_magic,
-            error.BadPayloadLen => .bad_payload_len,
-            error.BadAddress => .bad_address,
+    const cycles = if (config.debug_info) blk: {
+        var debug_buf: [8]u8 = undefined;
+        break :blk interpreter.execute(header.payload_len, &debug_buf) catch |err| {
+            return sendExecError(header.seq_id, err, &debug_buf);
         };
-        link.sendError(header.seq_id, code, &debug_buf);
-        return;
+    } else blk: {
+        break :blk interpreter.execute(header.payload_len, null) catch |err| {
+            return sendExecError(header.seq_id, err, &.{});
+        };
     };
 
     link.sendResponse(header.seq_id, .ok, std.mem.asBytes(&cycles), @truncate(cycles));
+}
+
+fn sendExecError(seq_id: u16, err: interpreter.ExecError, debug_buf: []const u8) noreturn {
+    const code: link.StatusCode = switch (err) {
+        error.BadMagic => .bad_magic,
+        error.BadPayloadLen => .bad_payload_len,
+        error.BadAddress => .bad_address,
+    };
+    link.sendError(seq_id, code, debug_buf);
 }

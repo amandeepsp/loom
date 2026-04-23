@@ -2,7 +2,7 @@ const std = @import("std");
 const cpu_csr = @import("cpu_csr.zig");
 const cfu = @import("cfu.zig");
 const dma = @import("dma.zig");
-const config = @import("fw_config");
+const config = @import("config");
 const ir = @import("ir");
 const link = @import("link.zig");
 const memory = @import("memory.zig");
@@ -70,30 +70,36 @@ const StreamContext = struct {
     }
 };
 
-pub fn execute(payload_len: u16, debug_buf: []u8) ExecError!u32 {
+pub fn execute(payload_len: u16, debug_buf: ?[]u8) ExecError!u32 {
     var ctx = StreamContext.init(payload_len);
     errdefer ctx.drainRemaining();
 
     const header = try ctx.read(ir.ProgramHeader);
     if (header.magic != ir.program_magic) {
-        debug_buf[0] = @intCast(payload_len);
-        debug_buf[1] = @intCast(ctx.remaining);
-        debug_buf[2] = @truncate(header.magic >> 24);
-        debug_buf[3] = @intCast(header.version);
+        if (debug_buf) |buf| {
+            buf[0] = @intCast(payload_len);
+            buf[1] = @intCast(ctx.remaining);
+            buf[2] = @truncate(header.magic >> 24);
+            buf[3] = @intCast(header.version);
+        }
         return error.BadMagic;
     }
     if (header.version != ir.program_version) {
-        debug_buf[0] = @intCast(payload_len);
-        debug_buf[1] = @intCast(ctx.remaining);
-        debug_buf[2] = @intCast(header.version);
-        debug_buf[3] = @truncate(header.magic >> 24);
+        if (debug_buf) |buf| {
+            buf[0] = @intCast(payload_len);
+            buf[1] = @intCast(ctx.remaining);
+            buf[2] = @intCast(header.version);
+            buf[3] = @truncate(header.magic >> 24);
+        }
         return error.BadPayloadLen;
     }
     if (header.num_tensors > max_tensors) {
-        debug_buf[0] = @intCast(payload_len);
-        debug_buf[1] = @intCast(ctx.remaining);
-        debug_buf[2] = header.num_tensors;
-        debug_buf[3] = @intCast(header.version);
+        if (debug_buf) |buf| {
+            buf[0] = @intCast(payload_len);
+            buf[1] = @intCast(ctx.remaining);
+            buf[2] = header.num_tensors;
+            buf[3] = @intCast(header.version);
+        }
         return error.BadPayloadLen;
     }
 
@@ -111,11 +117,13 @@ pub fn execute(payload_len: u16, debug_buf: []u8) ExecError!u32 {
 
     for (0..header.num_instructions) |_| {
         const opcode = try ctx.readOpcode();
-        debug_buf[0] = @intCast(payload_len);
-        debug_buf[1] = @intCast(ctx.remaining);
-        debug_buf[2] = @intCast(header.num_instructions);
-        debug_buf[3] = instr_idx;
-        debug_buf[4] = @intFromEnum(opcode);
+        if (debug_buf) |buf| {
+            buf[0] = @intCast(payload_len);
+            buf[1] = @intCast(ctx.remaining);
+            buf[2] = @intCast(header.num_instructions);
+            buf[3] = instr_idx;
+            buf[4] = @intFromEnum(opcode);
+        }
         instr_idx += 1;
 
         switch (opcode) {
@@ -154,10 +162,12 @@ pub fn execute(payload_len: u16, debug_buf: []u8) ExecError!u32 {
     }
 
     if (!saw_done or ctx.remaining != 0) {
-        debug_buf[0] = @intCast(payload_len);
-        debug_buf[1] = @intCast(ctx.remaining);
-        debug_buf[2] = @intFromBool(saw_done);
-        debug_buf[3] = instr_idx;
+        if (debug_buf) |buf| {
+            buf[0] = @intCast(payload_len);
+            buf[1] = @intCast(ctx.remaining);
+            buf[2] = @intFromBool(saw_done);
+            buf[3] = instr_idx;
+        }
         return error.BadPayloadLen;
     }
     return cpu_csr.mcycle.read() -% cycle_start;

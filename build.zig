@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+
+    // Common modules
     const protocol = b.createModule(.{
         .root_source_file = b.path("shared/protocol.zig"),
     });
@@ -8,8 +10,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("shared/ir.zig"),
     });
 
-    const drv_target = b.standardTargetOptions(.{});
-    const drv_optimize = b.standardOptimizeOption(.{});
+    // Config Options
     const cfu_rows = b.option(
         usize,
         "cfu-rows",
@@ -25,10 +26,17 @@ pub fn build(b: *std.Build) void {
         "cfu-store-depth",
         "CFU scratchpad depth in words (default: 512)",
     ) orelse 512;
-    const accel_config = b.addOptions();
-    accel_config.addOption(usize, "cfu_rows", cfu_rows);
-    accel_config.addOption(usize, "cfu_cols", cfu_cols);
-    accel_config.addOption(usize, "cfu_store_depth", cfu_store_depth);
+    const debug_info = b.option(bool, "debug-info", "Should include debug info") orelse false;
+
+    const config = b.addOptions();
+    config.addOption(usize, "cfu_rows", cfu_rows);
+    config.addOption(usize, "cfu_cols", cfu_cols);
+    config.addOption(usize, "cfu_store_depth", cfu_store_depth);
+    config.addOption(bool, "debug_info", debug_info);
+
+    // Host Driver
+    const drv_target = b.standardTargetOptions(.{});
+    const drv_optimize = b.standardOptimizeOption(.{});
 
     const serial_dep = b.dependency("serial", .{
         .target = drv_target,
@@ -43,7 +51,7 @@ pub fn build(b: *std.Build) void {
     driver_mod.addImport("serial", serial_dep.module("serial"));
     driver_mod.addImport("protocol", protocol);
     driver_mod.addImport("ir", ir);
-    driver_mod.addImport("accel_config", accel_config.createModule());
+    driver_mod.addImport("config", config.createModule());
 
     const drv_lib = b.addLibrary(.{
         .name = "driver",
@@ -62,7 +70,7 @@ pub fn build(b: *std.Build) void {
     drv_exe.root_module.linkLibrary(drv_lib);
     drv_exe.root_module.addImport("driver", driver_mod);
     drv_exe.root_module.addImport("ir", ir);
-    drv_exe.root_module.addImport("accel_config", accel_config.createModule());
+    drv_exe.root_module.addImport("config", config.createModule());
     b.installArtifact(drv_exe);
 
     const drv_c_api_mod = b.createModule(.{
@@ -73,14 +81,14 @@ pub fn build(b: *std.Build) void {
     drv_c_api_mod.addImport("driver", driver_mod);
 
     const drv_c_api_lib = b.addLibrary(.{
-        .name = "libaccel",
+        .name = "accel",
         .linkage = .dynamic,
         .root_module = drv_c_api_mod,
     });
 
     _ = b.addInstallArtifact(drv_c_api_lib, .{});
 
-    const libaccel_step = b.step("libaccel", "Build libaccel.so");
+    const libaccel_step = b.step("host-lib", "Build libaccel.so");
     libaccel_step.dependOn(&drv_c_api_lib.step);
 
     const run_drv = b.addRunArtifact(drv_exe);
@@ -96,6 +104,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run driver tests");
     test_step.dependOn(&run_drv_tests.step);
 
+    // Device firmware
     const fw_query: std.Target.Query = .{
         .cpu_arch = .riscv32,
         .os_tag = .freestanding,
@@ -113,7 +122,6 @@ pub fn build(b: *std.Build) void {
         "LiteX build directory (default: build/sim)",
     ) orelse "build/sim";
 
-    // Resolve build-dir relative to the project root (not CWD).
     const root_dir = b.build_root.handle;
     const crt0_path = std.fmt.allocPrint(
         b.allocator,
@@ -150,7 +158,7 @@ pub fn build(b: *std.Build) void {
     fw_mod.addImport("csr", csr_options.createModule());
     fw_mod.addImport("protocol", protocol);
     fw_mod.addImport("ir", ir);
-    fw_mod.addImport("fw_config", accel_config.createModule());
+    fw_mod.addImport("config", config.createModule());
 
     const fw_exe = b.addExecutable(.{
         .name = "firmware",
@@ -161,6 +169,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(fw_exe);
 
     // ELF → flat binary
+    // Zig's inbuilt objcopy adds zero padding, see: https://github.com/ziglang/zig/issues/25653
     const objcopy_prog = b.findProgram(
         &.{ "riscv64-elf-objcopy", "riscv64-unknown-elf-objcopy", "riscv64-linux-gnu-objcopy" },
         &.{"/usr/bin"},
@@ -173,7 +182,6 @@ pub fn build(b: *std.Build) void {
     const install_bin = b.addInstallBinFile(bin_output, "firmware.bin");
     b.getInstallStep().dependOn(&install_bin.step);
 
-    // Top-level step to build only firmware (ELF + flat binary)
     const install_elf = b.addInstallArtifact(fw_exe, .{});
     const fw_step = b.step("firmware", "Build firmware only");
     fw_step.dependOn(&install_bin.step);

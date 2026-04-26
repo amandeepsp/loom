@@ -13,7 +13,7 @@ Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python (SoC integrat
 - `host/` — Zig: native driver + C API (`libaccel.so`) for serial communication with board
 - `tvm/` — Python: TVM Relax patterns, codegen, quantization utils, runtime bridge
 - `models/` — Python: int8 MNIST training, static quantization, ONNX export
-- `tools/` — Python: e2e test harness (`test_gemm.py`), IR bytecode builder (`ir.py`), LiteX flash utils
+- `tools/` — Python: GEMM test harness (`test_gemm.py`), TVM sim test (`tvm_sim_test.py`), IR bytecode builder (`ir.py`), LiteX flash utils
 - `docs/` — Architecture Decision Records
 - `top.v` — **Generated** Verilog (from `hardware/top.py`)
 
@@ -52,7 +52,7 @@ just hw-upload
 just hw-upload-once
 
 # End-to-end GEMM test against board with firmware running
-just hw-e2e-gemm
+just hw-gemm
 ```
 
 **Build requirement:** `hw-build` must run first (generates CSR register addresses in `csr.json`).
@@ -66,6 +66,13 @@ uv run pytest hardware
 
 # Run single test file
 uv run pytest hardware/systolic/test_*.py -v
+
+# Sim regression (Verilator + firmware, no board)
+just sim-gemm                      # 8×8×8 default
+just sim-gemm m=4 k=16 n=4         # custom sizes
+
+# Sim TVM path (MNIST model on Verilator)
+just sim-tvm
 ```
 
 Tests live in: `hardware/systolic/`, `hardware/memory/`, `hardware/epilogue/`.
@@ -78,7 +85,7 @@ When making changes:
 1. **If RTL changes:** `just verilog` → `just hw-build` (generates `top.v` and CSR addresses)
 2. **If firmware changes:** `zig build firmware -Dbuild-dir=build/sipeed_tang_nano_20k` (depends on CSR from step 1)
 3. **If hardware tests fail:** `uv run pytest hardware -v` (simulation, no board needed)
-4. **If e2e fails:** `just hw-reset && just hw-upload-once && just hw-e2e-gemm`
+4. **If e2e fails:** `just hw-reset && just hw-upload-once && just hw-gemm`
 
 Missing any earlier step causes cryptic build failures (missing csr.json, undefined CSR addresses).
 
@@ -95,7 +102,7 @@ cfu_acc_width = "32"     # Accumulator width
 port = "/dev/ttyUSB1"    # Serial port for board
 ```
 
-When tuning hardware, update all three: Justfile, firmware invocation, and e2e environment vars (`ACCEL_CFU_WORD_BITS`, `ACCEL_CFU_STORE_DEPTH_WORDS`).
+When tuning hardware, update Justfile variables — they propagate to both Verilog generation and firmware build.
 
 ## IR & Protocol
 
@@ -176,8 +183,8 @@ uv run litex_term /dev/ttyUSB1  # not litex_term directly
 
 1. **"csr.json not found"** → Run `just hw-build` before `zig build firmware`.
 2. **Stale `top.v`** → Always run `just verilog` after RTL changes.
-3. **Parameter mismatch** → If you change `cfu_rows`, update Justfile, zig build, and e2e env vars.
-4. **Serial port collision** → Only one process can access `/dev/ttyUSB1`; close `litex_term` before `hw-e2e-gemm`.
+3. **Parameter mismatch** → If you change `cfu_rows`, update Justfile variables.
+4. **Serial port collision** → Only one process can access `/dev/ttyUSB1`; close `litex_term` before `hw-gemm`.
 5. **E2E test hangs** → Board may be in bad state; run `just hw-reset && just hw-upload-once` to recover.
 
 ## Debugging Firmware
@@ -232,9 +239,9 @@ Before testing on hardware, verify RTL with simulation:
 uv run pytest hardware -v
 ```
 
-### E2E Test Variants
+### GEMM Test Variants
 
-`accel-e2e-gemm` supports two test variants:
+`accel-gemm` supports two test variants:
 - **non-pipelined** → Load → DMA wait → Compute → Store (no overlap)
 - **pipelined** → Full K-tiling with DMA/compute overlap
 
@@ -253,5 +260,6 @@ Driver outputs to stderr. Use `-v` flag for verbose output showing all driver co
 No pre-commit hooks or CI workflows currently defined. Manual checks:
 - `uv run pytest hardware` must pass (Amaranth simulation).
 - `just hw-all` must complete end-to-end on Tang Nano 20K.
-- `accel-e2e-gemm /dev/ttyUSB1 all --verify-tolerance 1` should pass.
+- `accel-gemm /dev/ttyUSB1 all --verify-tolerance 1` should pass.
+- `just sim-gemm` should pass (GEMM regression on Verilator).
 - Don't commit `top.v` if it's stale; regenerate before committing.

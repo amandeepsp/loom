@@ -65,66 +65,219 @@ class RuntimeConfig:
     mem_align: int = MEM_ALIGN
 
 
+# ---------------------------------------------------------------------------
+# Transport layer — decouples AccelRuntime from wire protocol
+# ---------------------------------------------------------------------------
+
+
+class TcpTransport:
+    """Transport that speaks the accel wire protocol over a raw TCP socket.
+
+    Used for Verilator simulation (the sim exposes a virtual UART as a TCP
+    server).  This class is intentionally standalone so it can also be reused
+    by test harnesses that don't need the full TVM stack.
+    """
+
+    MAGIC_REQ = 0xCF
+    MAGIC_RESP = 0xFC
+    OP_READ = 0x10
+    OP_WRITE = 0x11
+    OP_EXEC = 0x12
+    STATUS_OK = 0x00
+
+    def __init__(self, endpoint: str, timeout_s: float = 300):
+        import socket
+
+        host, _, port = endpoint.removeprefix("tcp://").rpartition(":")
+        self._sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+        self._sock.settimeout(timeout_s)
+        self._seq_id = 0
+
+    def close(self) -> None:
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+    def _read_exact(self, length: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = self._sock.recv(length - len(chunks))
+            if not chunk:
+                raise ConnectionError("TCP transport connection closed")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def _request(self, op: int, payload: bytes, *, expected_len: int | None = None) -> bytes:
+        import struct
+
+        seq_id = self._seq_id
+        self._seq_id = (self._seq_id + 1) & 0xFFFF
+        self._sock.sendall(struct.pack(
+            "<BBHHH", self.MAGIC_REQ, op, len(payload), seq_id, 0))
+        self._sock.sendall(payload)
+
+        # Skip firmware startup banner
+        while self._read_exact(1)[0] != self.MAGIC_RESP:
+            pass
+        status, payload_len, resp_seq, _cycles = struct.unpack(
+            "<BHHH", self._read_exact(7))
+        data = self._read_exact(payload_len)
+        if resp_seq != seq_id:
+            raise RuntimeError(
+                f"bad response seq: expected {seq_id}, got {resp_seq}")
+        if status != self.STATUS_OK:
+            raise RuntimeError(
+                f"device error status=0x{status:02x} debug={list(data)}")
+        if expected_len is not None and payload_len != expected_len:
+            raise RuntimeError(
+                f"bad response length: expected {expected_len}, got {payload_len}")
+        return data
+
+    def write_mem(self, addr: int, data: bytes) -> None:
+        import struct
+
+        chunk_max = 0xFFFF - 4
+        for offset in range(0, len(data), chunk_max):
+            chunk = data[offset : offset + chunk_max]
+            self._request(self.OP_WRITE,
+                          struct.pack("<I", addr + offset) + chunk,
+                          expected_len=0)
+
+    def read_mem(self, addr: int, length: int) -> bytes:
+        import struct
+
+        out = bytearray()
+        chunk_max = 0xFFFF
+        for offset in range(0, length, chunk_max):
+            chunk_len = min(chunk_max, length - offset)
+            payload = struct.pack("<II", addr + offset, chunk_len)
+            out.extend(self._request(self.OP_READ, payload,
+                                     expected_len=chunk_len))
+        return bytes(out)
+
+    def exec_program(self, program: bytes) -> int:
+        import struct
+
+        data = self._request(self.OP_EXEC, program, expected_len=4)
+        return struct.unpack("<I", data)[0]
+
+
+# ---------------------------------------------------------------------------
+# Serial transport (libaccel.so via ctypes)
+# ---------------------------------------------------------------------------
+
+
 class _AccelHandle(ct.Structure):
     """Opaque C handle for the accelerator driver."""
 
 
-class _AccelApi:
-    """Typed wrapper around the exported `libaccel.so` symbols."""
+class SerialTransport:
+    """Transport over a physical serial port via ``libaccel.so``.
 
-    def __init__(self, lib_path: Path):
-        self.lib = ct.CDLL(str(lib_path))
-        self._configure()
+    Supports an extra ``ping`` method not available on the TCP transport.
+    """
 
-    def _configure(self) -> None:
-        self.lib.accel_open.argtypes = [
-            ct.c_char_p,
-            ct.c_uint32,
+    def __init__(self, port: str, baud_rate: int, lib_path: str):
+        lib = ct.CDLL(str(lib_path))
+        self._configure(lib)
+        self._lib = lib
+        self._handle: ct.POINTER(_AccelHandle) | None = None
+        self._port = port
+        self._baud_rate = baud_rate
+
+    @staticmethod
+    def _configure(lib) -> None:
+        lib.accel_open.argtypes = [
+            ct.c_char_p, ct.c_uint32,
             ct.POINTER(ct.POINTER(_AccelHandle)),
         ]
-        self.lib.accel_open.restype = ct.c_int
+        lib.accel_open.restype = ct.c_int
 
-        self.lib.accel_close.argtypes = [ct.POINTER(_AccelHandle)]
-        self.lib.accel_close.restype = None
+        lib.accel_close.argtypes = [ct.POINTER(_AccelHandle)]
+        lib.accel_close.restype = None
 
-        self.lib.accel_ping.argtypes = [ct.POINTER(_AccelHandle)]
-        self.lib.accel_ping.restype = ct.c_int
+        lib.accel_ping.argtypes = [ct.POINTER(_AccelHandle)]
+        lib.accel_ping.restype = ct.c_int
 
-        self.lib.accel_last_cycles.argtypes = [ct.POINTER(_AccelHandle)]
-        self.lib.accel_last_cycles.restype = ct.c_uint16
+        lib.accel_last_cycles.argtypes = [ct.POINTER(_AccelHandle)]
+        lib.accel_last_cycles.restype = ct.c_uint16
 
-        self.lib.accel_status_string.argtypes = [ct.c_int]
-        self.lib.accel_status_string.restype = ct.c_char_p
+        lib.accel_status_string.argtypes = [ct.c_int]
+        lib.accel_status_string.restype = ct.c_char_p
 
-        self.lib.accel_write_mem.argtypes = [
-            ct.POINTER(_AccelHandle),
-            ct.c_uint32,
-            ct.POINTER(ct.c_uint8),
-            ct.c_size_t,
+        lib.accel_write_mem.argtypes = [
+            ct.POINTER(_AccelHandle), ct.c_uint32,
+            ct.POINTER(ct.c_uint8), ct.c_size_t,
         ]
-        self.lib.accel_write_mem.restype = ct.c_int
+        lib.accel_write_mem.restype = ct.c_int
 
-        self.lib.accel_read_mem.argtypes = [
-            ct.POINTER(_AccelHandle),
-            ct.c_uint32,
-            ct.POINTER(ct.c_uint8),
-            ct.c_size_t,
+        lib.accel_read_mem.argtypes = [
+            ct.POINTER(_AccelHandle), ct.c_uint32,
+            ct.POINTER(ct.c_uint8), ct.c_size_t,
         ]
-        self.lib.accel_read_mem.restype = ct.c_int
+        lib.accel_read_mem.restype = ct.c_int
 
-        self.lib.accel_exec.argtypes = [
+        lib.accel_exec.argtypes = [
             ct.POINTER(_AccelHandle),
-            ct.POINTER(ct.c_uint8),
-            ct.c_size_t,
+            ct.POINTER(ct.c_uint8), ct.c_size_t,
             ct.POINTER(ct.c_uint32),
         ]
-        self.lib.accel_exec.restype = ct.c_int
+        lib.accel_exec.restype = ct.c_int
+
+    def open(self) -> None:
+        if self._handle is not None:
+            return
+        handle = ct.POINTER(_AccelHandle)()
+        status = self._lib.accel_open(
+            self._port.encode("utf-8"), self._baud_rate, ct.byref(handle))
+        self._check_status(status, "accel_open")
+        self._handle = handle
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        self._lib.accel_close(self._handle)
+        self._handle = None
+
+    def ping(self) -> None:
+        status = self._lib.accel_ping(self._handle)
+        self._check_status(status, "accel_ping")
+
+    def last_cycles(self) -> int:
+        return int(self._lib.accel_last_cycles(self._handle))
+
+    def write_mem(self, addr: int, data: bytes) -> None:
+        if not data:
+            return
+        c_buf = (ct.c_uint8 * len(data)).from_buffer_copy(data)
+        status = self._lib.accel_write_mem(self._handle, addr, c_buf, len(data))
+        self._check_status(status, "accel_write_mem")
+
+    def read_mem(self, addr: int, length: int) -> bytes:
+        if length == 0:
+            return b""
+        buf = (ct.c_uint8 * length)()
+        status = self._lib.accel_read_mem(self._handle, addr, buf, length)
+        self._check_status(status, "accel_read_mem")
+        return bytes(buf)
+
+    def exec_program(self, program: bytes) -> int:
+        c_buf = (ct.c_uint8 * len(program)).from_buffer_copy(program)
+        cycles = ct.c_uint32()
+        status = self._lib.accel_exec(self._handle, c_buf, len(program), ct.byref(cycles))
+        self._check_status(status, "accel_exec")
+        return int(cycles.value)
 
     def status_string(self, code: int) -> str:
-        raw = self.lib.accel_status_string(code)
+        raw = self._lib.accel_status_string(code)
         if raw is None:
             return f"status {code}"
         return raw.decode("utf-8", errors="replace")
+
+    def _check_status(self, status: int, opname: str) -> None:
+        if status != 0:
+            detail = self.status_string(status)
+            raise AccelRuntimeError(f"{opname} failed: {detail}")
 
 
 @visitor
@@ -208,51 +361,28 @@ def compute_reference_matmul(lhs: Any, rhs: Any) -> np.ndarray:
     return np.ascontiguousarray(lhs_arr @ rhs_arr, dtype=np.int32)
 
 
+# Transport union: either TCP or serial
+AccelTransport = TcpTransport | SerialTransport
+
+
 class AccelRuntime:
-    """Runtime wrapper around `libaccel.so` for tile-oriented execution."""
+    """Runtime for tile-oriented GEMM execution on the accelerator.
 
-    def __init__(self, config: RuntimeConfig | None = None):
+    Requires a *transport* — ``TcpTransport`` for Verilator simulation or
+    ``SerialTransport`` for real hardware via ``libaccel.so``.
+    """
+
+    def __init__(self, transport: AccelTransport,
+                 config: RuntimeConfig | None = None):
+        self.transport = transport
         self.config = config or RuntimeConfig()
-        self._api: _AccelApi | None = None
-        self._handle: ct.POINTER(_AccelHandle) | None = None
-
-    def library_exists(self) -> bool:
-        """Return whether the configured shared library path exists."""
-
-        return Path(self.config.lib_path).exists()
-
-    def is_open(self) -> bool:
-        """Return whether the runtime currently holds an open device handle."""
-
-        return self._handle is not None
 
     def open(self) -> None:
-        """Open the accelerator device connection."""
-
-        if self._handle is not None:
-            return
-
-        lib_path = Path(self.config.lib_path)
-        if not lib_path.exists():
-            raise FileNotFoundError(f"missing accelerator library: {lib_path}")
-
-        self._api = _AccelApi(lib_path)
-        handle = ct.POINTER(_AccelHandle)()
-        status = self._api.lib.accel_open(
-            self.config.port.encode("utf-8"),
-            self.config.baud_rate,
-            ct.byref(handle),
-        )
-        self._check_status(status, "accel_open")
-        self._handle = handle
+        if isinstance(self.transport, SerialTransport):
+            self.transport.open()
 
     def close(self) -> None:
-        """Close the accelerator device connection."""
-
-        if self._handle is None or self._api is None:
-            return
-        self._api.lib.accel_close(self._handle)
-        self._handle = None
+        self.transport.close()
 
     def __enter__(self) -> "AccelRuntime":
         self.open()
@@ -262,62 +392,32 @@ class AccelRuntime:
         self.close()
 
     def ping(self) -> None:
-        """Issue a ping command to the device."""
-
-        api = self._require_api()
-        handle = self._require_handle()
-        status = api.lib.accel_ping(handle)
-        self._check_status(status, "accel_ping")
+        if not isinstance(self.transport, SerialTransport):
+            raise AccelRuntimeError("ping only available on serial transport")
+        self.transport.ping()
 
     def last_cycles(self) -> int:
-        """Return the most recent cycle count recorded by the driver."""
-
-        api = self._require_api()
-        handle = self._require_handle()
-        return int(api.lib.accel_last_cycles(handle))
+        if not isinstance(self.transport, SerialTransport):
+            raise AccelRuntimeError("last_cycles only available on serial transport")
+        return self.transport.last_cycles()
 
     def write_mem(self, addr: int, data: bytes | bytearray | memoryview) -> None:
-        """Write a raw byte buffer into accelerator-visible memory."""
-
-        api = self._require_api()
-        handle = self._require_handle()
-        blob = bytes(data)
-        if not blob:
-            return
-        array_type = ct.c_uint8 * len(blob)
-        buf = array_type.from_buffer_copy(blob)
-        status = api.lib.accel_write_mem(handle, addr, buf, len(blob))
-        self._check_status(status, "accel_write_mem")
+        blob = bytes(data) if not isinstance(data, bytes) else data
+        if blob:
+            self.transport.write_mem(addr, blob)
 
     def read_mem(self, addr: int, length: int) -> bytes:
-        """Read a raw byte buffer from accelerator-visible memory."""
-
-        api = self._require_api()
-        handle = self._require_handle()
         if length < 0:
             raise ValueError("length must be non-negative")
         if length == 0:
             return b""
-        array_type = ct.c_uint8 * length
-        buf = array_type()
-        status = api.lib.accel_read_mem(handle, addr, buf, length)
-        self._check_status(status, "accel_read_mem")
-        return bytes(buf)
+        return self.transport.read_mem(addr, length)
 
     def exec_program(self, program: bytes | bytearray | memoryview) -> int:
-        """Execute a KIR program and return the reported cycle count."""
-
-        api = self._require_api()
-        handle = self._require_handle()
-        blob = bytes(program)
+        blob = bytes(program) if not isinstance(program, bytes) else program
         if not blob:
             raise ValueError("program must not be empty")
-        array_type = ct.c_uint8 * len(blob)
-        program_buf = array_type.from_buffer_copy(blob)
-        cycles = ct.c_uint32()
-        status = api.lib.accel_exec(handle, program_buf, len(blob), ct.byref(cycles))
-        self._check_status(status, "accel_exec")
-        return int(cycles.value)
+        return self.transport.exec_program(blob)
 
     def execute_tile(
         self,
@@ -440,7 +540,7 @@ class AccelRuntime:
         done_opcode = 0x06
 
         num_tensors = program[5]
-        cursor = 8 + num_tensors * 12
+        cursor = 8 + num_tensors * 16
         while cursor < len(program):
             opcode = program[cursor]
             if opcode == set_epilogue_opcode:
@@ -456,31 +556,6 @@ class AccelRuntime:
                 cursor += 8
             else:
                 raise AccelRuntimeError(f"unknown opcode while patching program: 0x{opcode:02x}")
-
-    def _require_api(self) -> _AccelApi:
-        api = self._api
-        if api is None:
-            lib_path = Path(self.config.lib_path)
-            if not lib_path.exists():
-                raise FileNotFoundError(f"missing accelerator library: {lib_path}")
-            api = _AccelApi(lib_path)
-            self._api = api
-        return api
-
-    def _require_handle(self) -> ct.POINTER(_AccelHandle):
-        handle = self._handle
-        if handle is None:
-            raise AccelRuntimeError("accelerator runtime is not open")
-        return handle
-
-    def _check_status(self, status: int, opname: str) -> None:
-        if status == 0:
-            return
-        api = self._api
-        detail = f"status {status}"
-        if api is not None:
-            detail = api.status_string(status)
-        raise AccelRuntimeError(f"{opname} failed: {detail}")
 
 
 def collect_extern_symbols(mod: tvm.IRModule) -> list[str]:
@@ -671,12 +746,7 @@ def create_runtime(
     baud_rate: int = 115200,
     lib_path: str = "zig-out/lib/libaccel.so",
 ) -> AccelRuntime:
-    """Create a configured runtime instance."""
+    """Create a configured runtime instance with a serial transport."""
 
-    return AccelRuntime(
-        RuntimeConfig(
-            port=port,
-            baud_rate=baud_rate,
-            lib_path=lib_path,
-        )
-    )
+    transport = SerialTransport(port=port, baud_rate=baud_rate, lib_path=lib_path)
+    return AccelRuntime(transport, RuntimeConfig(port=port, baud_rate=baud_rate, lib_path=lib_path))

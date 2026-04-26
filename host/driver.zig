@@ -17,10 +17,14 @@ pub const AccelError = error{
 };
 
 pub const Driver = struct {
-    port: std.fs.File,
+    transport: Transport,
     last_cycles: u16 = 0,
 
     pub fn init(port_path: []const u8, baud_rate: u32) !Driver {
+        if (std.mem.startsWith(u8, port_path, "tcp://")) {
+            return .{ .transport = try Transport.initTcp(port_path["tcp://".len..]) };
+        }
+
         const port = try std.fs.openFileAbsolute(port_path, .{ .mode = .read_write });
         errdefer port.close();
 
@@ -30,11 +34,11 @@ pub const Driver = struct {
         });
         try serial.flushSerialPort(port, .both);
 
-        return .{ .port = port };
+        return .{ .transport = .{ .serial = port } };
     }
 
     pub fn deinit(self: *Driver) void {
-        self.port.close();
+        self.transport.close();
     }
 
     fn drainBytes(self: *Driver, len: usize) !void {
@@ -42,7 +46,7 @@ pub const Driver = struct {
         var buf: [256]u8 = undefined;
         while (remaining > 0) {
             const chunk_len = @min(remaining, buf.len);
-            const read_len = try self.port.readAll(buf[0..chunk_len]);
+            const read_len = try self.transport.readAll(buf[0..chunk_len]);
             if (read_len != chunk_len) return error.BadResponse;
             remaining -= chunk_len;
         }
@@ -59,16 +63,20 @@ pub const Driver = struct {
         if (payload_len > std.math.maxInt(u16)) return error.PayloadTooLarge;
 
         const header = protocol.RequestHeader.init(op, @intCast(payload_len), 0);
-        try self.port.writeAll(header.as_bytes());
-        try self.port.writeAll(payload_a);
-        try self.port.writeAll(payload_b);
+        try self.transport.writeAll(header.as_bytes());
+        try self.transport.writeAll(payload_a);
+        try self.transport.writeAll(payload_b);
 
         var resp_header_buf: [@sizeOf(protocol.ResponseHeader)]u8 = undefined;
-        const read_len = try self.port.readAll(&resp_header_buf);
-        if (read_len != resp_header_buf.len) return error.BadResponse;
+        while (true) {
+            const read_len = try self.transport.readAll(resp_header_buf[0..1]);
+            if (read_len != 1) return error.BadResponse;
+            if (resp_header_buf[0] == protocol.MAGIC_RESP) break;
+        }
+        const read_len = try self.transport.readAll(resp_header_buf[1..]);
+        if (read_len != resp_header_buf.len - 1) return error.BadResponse;
 
         const resp_header = protocol.ResponseHeader.from_bytes(&resp_header_buf);
-        if (resp_header.magic != protocol.MAGIC_RESP) return error.BadMagic;
 
         if (!resp_header.status.isOk()) {
             log.err("device returned error: {s} (0x{X:0>2})", .{
@@ -78,7 +86,7 @@ pub const Driver = struct {
             if (resp_header.payload_len > 0) {
                 var debug_buf: [256]u8 = undefined;
                 const debug_len = @min(resp_header.payload_len, debug_buf.len);
-                const debug_read = try self.port.readAll(debug_buf[0..debug_len]);
+                const debug_read = try self.transport.readAll(debug_buf[0..debug_len]);
                 if (debug_read > 0) {
                     log.err("debug payload ({d} bytes): {any}", .{
                         debug_read,
@@ -103,7 +111,7 @@ pub const Driver = struct {
         }
 
         if (response.len > 0) {
-            const read_payload_len = try self.port.readAll(response);
+            const read_payload_len = try self.transport.readAll(response);
             if (read_payload_len != response.len) return error.BadResponse;
         }
     }
@@ -161,6 +169,43 @@ pub const Driver = struct {
         var response: [4]u8 = undefined;
         try self.issuePayload(.exec, program, &response);
         return std.mem.readInt(u32, &response, .little);
+    }
+};
+
+const Transport = union(enum) {
+    serial: std.fs.File,
+    tcp: std.net.Stream,
+
+    fn initTcp(spec: []const u8) !Transport {
+        const colon = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return error.InvalidArgument;
+        const host = spec[0..colon];
+        const port_text = spec[colon + 1 ..];
+        if (host.len == 0 or port_text.len == 0) return error.InvalidArgument;
+
+        const port = try std.fmt.parseInt(u16, port_text, 10);
+        const stream = try std.net.tcpConnectToHost(std.heap.page_allocator, host, port);
+        return .{ .tcp = stream };
+    }
+
+    fn close(self: Transport) void {
+        switch (self) {
+            .serial => |file| file.close(),
+            .tcp => |stream| stream.close(),
+        }
+    }
+
+    fn readAll(self: Transport, buf: []u8) !usize {
+        return switch (self) {
+            .serial => |file| try file.readAll(buf),
+            .tcp => |stream| try stream.readAtLeast(buf, buf.len),
+        };
+    }
+
+    fn writeAll(self: Transport, data: []const u8) !void {
+        switch (self) {
+            .serial => |file| try file.writeAll(data),
+            .tcp => |stream| try stream.writeAll(data),
+        }
     }
 };
 

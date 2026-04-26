@@ -30,43 +30,59 @@ class Epilogue(Component):
 
     first_in / last_in mark the boundaries of a result stream.
     Data is valid on every cycle from first_in through last_in (inclusive).
+
+    When wide=2, two parallel lanes process adjacent results (index and index+1)
+    on the same cycle.  The sequencer is responsible for stride-2 indexing.
     """
 
-    def __init__(self, num_results=16, acc_width=32, out_width=8):
+    def __init__(self, num_results=16, acc_width=32, out_width=8, wide=1):
+        assert wide in (1, 2), "wide must be 1 or 2"
         self._num_results = num_results
         self._acc_width = acc_width
         self._out_width = out_width
+        self._wide = wide
 
-        super().__init__(
-            {
-                # Input stream (from sequencer)
-                "data_in": In(signed(acc_width)),
-                "first_in": In(1),
-                "last_in": In(1),
-                # Per-channel params (indexed externally by epi_index)
-                "bias": In(signed(18)),
-                "multiplier": In(signed(32)),
-                "shift": In(unsigned(5)),
-                # Per-layer params (constant across tile)
-                "output_offset": In(signed(16)),
-                "activation_min": In(signed(out_width)),
-                "activation_max": In(signed(out_width)),
-                # Done signal back to sequencer
-                "done": Out(1),
-                # Result readback (active any time, outside pipeline)
-                "out_addr": In(ceil_log2(num_results)),
-                "out_data": Out(signed(out_width)),
-            }
-        )
+        ports = {
+            # Input stream lane 0 (from sequencer)
+            "data_in": In(signed(acc_width)),
+            "first_in": In(1),
+            "last_in": In(1),
+            # Per-channel params lane 0
+            "bias": In(signed(18)),
+            "multiplier": In(signed(32)),
+            "shift": In(unsigned(5)),
+            # Per-layer params (constant across tile)
+            "output_offset": In(signed(16)),
+            "activation_min": In(signed(out_width)),
+            "activation_max": In(signed(out_width)),
+            # Done signal back to sequencer
+            "done": Out(1),
+            # Result readback (active any time, outside pipeline)
+            "out_addr": In(ceil_log2(num_results)),
+            "out_data": Out(signed(out_width)),
+        }
+
+        if wide == 2:
+            ports["data_in_1"] = In(signed(acc_width))
+            ports["bias_1"] = In(signed(18))
+            ports["multiplier_1"] = In(signed(32))
+            ports["shift_1"] = In(unsigned(5))
+
+        super().__init__(ports)
 
     def elaborate(self, _platform):
         m = Module()
 
         num = self._num_results
+        wide = self._wide
 
         # --- Pipeline stages ---
         m.submodules.srdhm = srdhm = SRDHM()
         m.submodules.rdbpot = rdbpot = RoundingDividebyPOT()
+
+        if wide == 2:
+            m.submodules.srdhm_1 = srdhm_1 = SRDHM()
+            m.submodules.rdbpot_1 = rdbpot_1 = RoundingDividebyPOT()
 
         # Data is valid whenever first or last is asserted, or we're between them
         active = Signal()
@@ -105,6 +121,28 @@ class Epilogue(Component):
         with m.Else():
             m.d.comb += clamped.eq(with_offset)
 
+        if wide == 2:
+            m.d.comb += [
+                srdhm_1.a.eq(self.data_in_1 + self.bias_1),
+                srdhm_1.b.eq(self.multiplier_1),
+                srdhm_1.start.eq(valid),
+            ]
+            reg_shift_1 = Signal(unsigned(5))
+            m.d.sync += reg_shift_1.eq(self.shift_1)
+            m.d.comb += [
+                rdbpot_1.x.eq(srdhm_1.out),
+                rdbpot_1.exponent.eq(reg_shift_1),
+            ]
+            with_offset_1 = Signal(signed(32))
+            clamped_1 = Signal(signed(self._out_width))
+            m.d.comb += with_offset_1.eq(rdbpot_1.result + self.output_offset)
+            with m.If(with_offset_1 > self.activation_max):
+                m.d.comb += clamped_1.eq(self.activation_max)
+            with m.Elif(with_offset_1 < self.activation_min):
+                m.d.comb += clamped_1.eq(self.activation_min)
+            with m.Else():
+                m.d.comb += clamped_1.eq(with_offset_1)
+
         # --- Valid tracking (1-cycle delay matching SRDHM) ---
         valid_out = Signal()
         last_out = Signal()
@@ -123,8 +161,10 @@ class Epilogue(Component):
         with m.If(valid_out):
             m.d.sync += [
                 results[write_idx].eq(clamped),
-                write_idx.eq(write_idx + 1),
+                write_idx.eq(write_idx + wide),
             ]
+            if wide == 2:
+                m.d.sync += results[write_idx + 1].eq(clamped_1)
             with m.If(last_out):
                 m.d.sync += [
                     self.done.eq(1),
@@ -157,24 +197,31 @@ class PerChannelStore(Component):
 
     Write: CPU selects field via wr_sel, writes one entry at a time.
     Read:  Sequencer drives rd_addr; data appears combinationally (same cycle).
+    When wide=2, a second read port provides params for the adjacent channel.
     """
 
-    def __init__(self, depth=16):
+    def __init__(self, depth=16, wide=1):
+        assert wide in (1, 2), "wide must be 1 or 2"
         self.depth = depth
-        super().__init__(
-            {
-                # Write port (from CFU instruction)
-                "wr_addr": In(range(depth)),
-                "wr_data": In(signed(32)),
-                "wr_sel": In(PerChannelWriteSelect),
-                "wr_en": In(1),
-                # Read port (from sequencer — 1 cycle latency)
-                "rd_addr": In(range(depth)),
-                "bias": Out(signed(18)),
-                "multiplier": Out(signed(32)),
-                "shift": Out(unsigned(5)),
-            }
-        )
+        self.wide = wide
+        ports = {
+            # Write port (from CFU instruction)
+            "wr_addr": In(range(depth)),
+            "wr_data": In(signed(32)),
+            "wr_sel": In(PerChannelWriteSelect),
+            "wr_en": In(1),
+            # Read port lane 0
+            "rd_addr": In(range(depth)),
+            "bias": Out(signed(18)),
+            "multiplier": Out(signed(32)),
+            "shift": Out(unsigned(5)),
+        }
+        if wide == 2:
+            ports["rd_addr_1"] = In(range(depth))
+            ports["bias_1"] = Out(signed(18))
+            ports["multiplier_1"] = Out(signed(32))
+            ports["shift_1"] = Out(unsigned(5))
+        super().__init__(ports)
 
     def elaborate(self, _platform):
         m = Module()
@@ -219,5 +266,20 @@ class PerChannelStore(Component):
             self.multiplier.eq(rd_mult.data),
             self.shift.eq(rd_shift.data),
         ]
+
+        if self.wide == 2:
+            rd_bias_1 = bias_mem.read_port(domain="comb")
+            rd_mult_1 = mult_mem.read_port(domain="comb")
+            rd_shift_1 = shift_mem.read_port(domain="comb")
+            m.d.comb += [
+                rd_bias_1.addr.eq(self.rd_addr_1),
+                rd_mult_1.addr.eq(self.rd_addr_1),
+                rd_shift_1.addr.eq(self.rd_addr_1),
+            ]
+            m.d.comb += [
+                self.bias_1.eq(rd_bias_1.data),
+                self.multiplier_1.eq(rd_mult_1.data),
+                self.shift_1.eq(rd_shift_1.data),
+            ]
 
         return m

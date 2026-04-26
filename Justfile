@@ -9,6 +9,7 @@ cfu_store_depth := "512"
 cfu_in_width := "8"
 cfu_acc_width := "32"
 port := "/dev/ttyUSB1"
+sim_port := "21450"
 
 # Default: list available recipes
 default:
@@ -67,26 +68,93 @@ hw-upload-once:
         --reset-command 'just hw-reset' \
         --post-boot-timeout 12
 
-# Run the end-to-end GEMM test against a board with firmware running
-hw-e2e-gemm:
-    env ACCEL_CFU_WORD_BITS=$(({{ cfu_rows }} * {{ cfu_in_width }})) \
-        ACCEL_CFU_STORE_DEPTH_WORDS={{ cfu_store_depth }} \
-        uv run accel-e2e-gemm {{ port }}
+# === Hardware tests (require board + running firmware) =======================
 
-# Run a larger pipelined GEMM that spans multiple K chunks
-hw-e2e-gemm-large:
-    env ACCEL_CFU_WORD_BITS=$(({{ cfu_rows }} * {{ cfu_in_width }})) \
-        ACCEL_CFU_STORE_DEPTH_WORDS={{ cfu_store_depth }} \
-        uv run accel-e2e-gemm {{ port }} --m {{ cfu_rows }} --k $((({{ cfu_store_depth }} * 4 / {{ cfu_rows }}) + 128)) --n {{ cfu_cols }}
+# Run GEMM test against real hardware.  Tunable: m, k, n, variant, verify-tolerance.
+hw-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": libaccel hw-firmware
+    uv run python -m tools.test_gemm {{ port }} {{ variant }} \
+        --m {{ m }} --k {{ k }} --n {{ n }} \
+        --cfu-word-bits $(({{ cfu_rows }} * {{ cfu_in_width }})) \
+        --cfu-store-depth-words {{ cfu_store_depth }} \
+        --verify-tolerance {{ verify-tolerance }}
 
-# JTAG reset → pause → serial-boot firmware → small strict e2e → large strict e2e (one after another).
-# Reset clears SDRAM, so we always re-upload before the tests.
-hw-e2e-after-reset:
+# JTAG reset → firmware upload → small GEMM → large GEMM (one after another).
+hw-gemm-reset:
     just hw-reset
     sleep 2
     just hw-upload-once
-    just hw-e2e-gemm
-    just hw-e2e-gemm-large
+    just hw-gemm
+    just hw-gemm m={{ cfu_rows }} \
+        k="$(( ({{ cfu_store_depth }} * 4 / {{ cfu_rows }}) + 128 ))" \
+        n={{ cfu_cols }}
 
 # Full hardware flow: build SoC → flash → build firmware → upload
 hw-all: hw-build hw-flash hw-firmware hw-upload-once
+
+# === Simulation (no board needed) ============================================
+
+# Generate sim SoC (csr.json) without compiling gateware
+sim-generate: verilog
+    uv run python -m soc.sim \
+        --no-compile-gateware \
+        --cfu-rows {{ cfu_rows }} \
+        --cfu-cols {{ cfu_cols }} \
+        --cfu-store-depth {{ cfu_store_depth }} \
+        --cfu-in-width {{ cfu_in_width }} \
+        --output-dir build/sim
+
+# Build firmware targeting the simulation SoC
+sim-firmware: sim-generate
+    zig build firmware \
+        -Dbuild-dir=build/sim \
+        -Dcfu-rows={{ cfu_rows }} \
+        -Dcfu-cols={{ cfu_cols }} \
+        -Dcfu-store-depth={{ cfu_store_depth }} \
+        -Ddebug-info=true
+
+# Run full Verilator simulation with firmware (interactive)
+sim-run: sim-firmware
+    uv run python -m soc.sim \
+        --cfu-rows {{ cfu_rows }} \
+        --cfu-cols {{ cfu_cols }} \
+        --cfu-store-depth {{ cfu_store_depth }} \
+        --cfu-in-width {{ cfu_in_width }} \
+        --sdram-init zig-out/bin/firmware.bin \
+        --output-dir build/sim
+
+# Run Verilator sim non-interactively (for CI)
+sim-run-ci: sim-firmware
+    uv run python -m soc.sim \
+        --cfu-rows {{ cfu_rows }} \
+        --cfu-cols {{ cfu_cols }} \
+        --cfu-store-depth {{ cfu_store_depth }} \
+        --cfu-in-width {{ cfu_in_width }} \
+        --sdram-init zig-out/bin/firmware.bin \
+        --output-dir build/sim \
+        --non-interactive
+
+# Shared sim-launch args forwarded to soc.sim (cfu config + firmware image).
+_sim_args := "--sim-arg=--cfu-rows --sim-arg=" + cfu_rows + " " \
+    + "--sim-arg=--cfu-cols --sim-arg=" + cfu_cols + " " \
+    + "--sim-arg=--cfu-store-depth --sim-arg=" + cfu_store_depth + " " \
+    + "--sim-arg=--cfu-in-width --sim-arg=" + cfu_in_width + " " \
+    + "--sim-arg=--sdram-init --sim-arg=zig-out/bin/firmware.bin " \
+    + "--sim-arg=--output-dir --sim-arg=build/sim"
+
+# GEMM regression test on Verilator simulation.  Tunable: m, k, n, variant, tolerance.
+sim-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": sim-firmware
+    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
+        uv run python -m tools.test_gemm \
+            tcp://127.0.0.1:{{ sim_port }} {{ variant }} \
+            --m {{ m }} --k {{ k }} --n {{ n }} \
+            --cfu-word-bits $(({{ cfu_rows }} * {{ cfu_in_width }})) \
+            --cfu-store-depth-words {{ cfu_store_depth }} \
+            --driver-timeout 600 \
+            --verify-tolerance {{ verify-tolerance }}
+
+# TVM path MNIST inference on Verilator simulation.
+sim-tvm verify-tolerance="1": sim-firmware
+    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
+        uv run python tools/tvm_sim_test.py \
+            --tcp tcp://127.0.0.1:{{ sim_port }} \
+            --verify-tolerance {{ verify-tolerance }}

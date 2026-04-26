@@ -39,7 +39,7 @@ fn exec(header: link.Header) void {
     link.sendResponse(header.seq_id, .ok, std.mem.asBytes(&cycles), @truncate(cycles));
 }
 
-fn sendExecError(seq_id: u16, err: interpreter.ExecError, debug_buf: []const u8) noreturn {
+fn sendExecError(seq_id: u16, err: interpreter.ExecError, debug_buf: []const u8) void {
     const code: link.StatusCode = switch (err) {
         error.BadMagic => .bad_magic,
         error.BadPayloadLen => .bad_payload_len,

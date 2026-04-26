@@ -11,6 +11,8 @@ import argparse
 import logging
 import os
 import pathlib
+import socket
+import struct
 import subprocess
 import tempfile
 
@@ -33,6 +35,13 @@ DEFAULT_CFU_STORE_DEPTH_WORDS = int(
 DEFAULT_DRIVER_TIMEOUT_S = float(os.environ.get("ACCEL_DRIVER_TIMEOUT_S", "120"))
 TENSOR_POOL_BASE = 0x40010000
 MEM_ALIGN = 32
+MAGIC_REQ = 0xCF
+MAGIC_RESP = 0xFC
+OP_PING = 0x00
+OP_READ = 0x10
+OP_WRITE = 0x11
+OP_EXEC = 0x12
+STATUS_OK = 0x00
 
 
 def run(cmd: list[str], *, timeout_s: float) -> str:
@@ -233,6 +242,74 @@ def write_blob(
         temp_path.unlink(missing_ok=True)
 
 
+class TcpAccelClient:
+    def __init__(self, endpoint: str, timeout_s: float):
+        if not endpoint.startswith("tcp://"):
+            raise ValueError("TCP endpoint must start with tcp://")
+        spec = endpoint[len("tcp://") :]
+        host, sep, port_text = spec.rpartition(":")
+        if not sep or not host or not port_text:
+            raise ValueError(f"invalid TCP endpoint: {endpoint}")
+        self.sock = socket.create_connection((host, int(port_text)), timeout=timeout_s)
+        self.sock.settimeout(timeout_s)
+        self.seq_id = 0
+
+    def close(self) -> None:
+        self.sock.close()
+
+    def _read_exact(self, length: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = self.sock.recv(length - len(chunks))
+            if not chunk:
+                raise ConnectionError("sim UART TCP connection closed")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def _request(self, op: int, payload: bytes, expected_len: int | None = None) -> bytes:
+        if len(payload) > 0xFFFF:
+            raise ValueError("payload too large")
+        seq_id = self.seq_id
+        self.seq_id = (self.seq_id + 1) & 0xFFFF
+
+        self.sock.sendall(struct.pack("<BBHHH", MAGIC_REQ, op, len(payload), seq_id, 0))
+        self.sock.sendall(payload)
+
+        # Firmware prints a startup banner before protocol traffic; skip it.
+        while self._read_exact(1)[0] != MAGIC_RESP:
+            pass
+        status, payload_len, resp_seq, _cycles = struct.unpack("<BHHH", self._read_exact(7))
+        data = self._read_exact(payload_len)
+        if resp_seq != seq_id:
+            raise RuntimeError(f"bad response seq: expected {seq_id}, got {resp_seq}")
+        if status != STATUS_OK:
+            log.error("device returned error status=0x%02x debug=%s", status, list(data))
+            raise SystemExit(1)
+        if expected_len is not None and payload_len != expected_len:
+            raise RuntimeError(f"bad response length: expected {expected_len}, got {payload_len}")
+        return data
+
+    def write_mem(self, addr: int, data: bytes) -> None:
+        chunk_max = 0xFFFF - 4
+        for offset in range(0, len(data), chunk_max):
+            chunk = data[offset : offset + chunk_max]
+            payload = struct.pack("<I", addr + offset) + chunk
+            self._request(OP_WRITE, payload, expected_len=0)
+
+    def read_mem(self, addr: int, length: int) -> bytes:
+        out = bytearray()
+        chunk_max = 0xFFFF
+        for offset in range(0, length, chunk_max):
+            chunk_len = min(chunk_max, length - offset)
+            payload = struct.pack("<II", addr + offset, chunk_len)
+            out.extend(self._request(OP_READ, payload, expected_len=chunk_len))
+        return bytes(out)
+
+    def exec(self, program: bytes) -> int:
+        data = self._request(OP_EXEC, program, expected_len=4)
+        return struct.unpack("<I", data)[0]
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(
@@ -263,7 +340,7 @@ def main() -> int:
     logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     driver = pathlib.Path(args.driver)
-    if not driver.is_file():
+    if not args.port.startswith("tcp://") and not driver.is_file():
         log.error("missing driver: %s", driver)
         raise SystemExit(1)
 
@@ -305,13 +382,21 @@ def main() -> int:
     expected_bytes = np.ascontiguousarray(expected).astype(np.int8).tobytes()
 
     to = args.driver_timeout
+    tcp_client = TcpAccelClient(args.port, to) if args.port.startswith("tcp://") else None
 
     log.info("uploading test data...")
-    write_blob(driver, args.port, input_addr, input_data, ".input.bin", timeout_s=to)
-    write_blob(driver, args.port, weight_addr, weight_data, ".wgt.bin", timeout_s=to)
-    write_blob(driver, args.port, bias_addr, bias_data, ".bias.bin", timeout_s=to)
-    write_blob(driver, args.port, mult_addr, mult_data, ".mult.bin", timeout_s=to)
-    write_blob(driver, args.port, shift_addr, shift_data, ".shift.bin", timeout_s=to)
+    if tcp_client is not None:
+        tcp_client.write_mem(input_addr, input_data)
+        tcp_client.write_mem(weight_addr, weight_data)
+        tcp_client.write_mem(bias_addr, bias_data)
+        tcp_client.write_mem(mult_addr, mult_data)
+        tcp_client.write_mem(shift_addr, shift_data)
+    else:
+        write_blob(driver, args.port, input_addr, input_data, ".input.bin", timeout_s=to)
+        write_blob(driver, args.port, weight_addr, weight_data, ".wgt.bin", timeout_s=to)
+        write_blob(driver, args.port, bias_addr, bias_data, ".bias.bin", timeout_s=to)
+        write_blob(driver, args.port, mult_addr, mult_data, ".mult.bin", timeout_s=to)
+        write_blob(driver, args.port, shift_addr, shift_data, ".shift.bin", timeout_s=to)
 
     if args.variant == "all":
         variants = ["non-pipelined", "pipelined"]
@@ -356,45 +441,57 @@ def main() -> int:
 
         log.debug("program (%d bytes): %s", len(program), program.hex())
 
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(program)
-            f.flush()
-            prog_path = f.name
-
+        prog_path = None
         try:
-            out = run([str(driver), args.port, "exec-bin", prog_path], timeout_s=to)
-            if "exec-bin ok" not in out:
-                log.error("%s: FAILED (exec error)", variant)
-                all_passed = False
-                continue
+            if tcp_client is not None:
+                cycles = tcp_client.exec(program)
+                log.info("exec ok, cycles=%d", cycles)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+                    f.write(program)
+                    f.flush()
+                    prog_path = f.name
+
+                out = run([str(driver), args.port, "exec-bin", prog_path], timeout_s=to)
+                if "exec-bin ok" not in out:
+                    log.error("%s: FAILED (exec error)", variant)
+                    all_passed = False
+                    continue
 
             if args.no_verify:
                 log.info("%s: PASSED (no verify)", variant)
                 continue
 
-            with tempfile.NamedTemporaryFile(suffix=".out.bin", delete=False) as f:
-                out_path = f.name
+            if tcp_client is not None:
+                actual = tcp_client.read_mem(output_addr, output_size)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".out.bin", delete=False) as f:
+                    out_path = f.name
 
-            run(
-                [
-                    str(driver),
-                    args.port,
-                    "read-file",
-                    hex(output_addr),
-                    str(output_size),
-                    out_path,
-                ],
-                timeout_s=to,
-            )
-            actual = pathlib.Path(out_path).read_bytes()
-            pathlib.Path(out_path).unlink(missing_ok=True)
+                run(
+                    [
+                        str(driver),
+                        args.port,
+                        "read-file",
+                        hex(output_addr),
+                        str(output_size),
+                        out_path,
+                    ],
+                    timeout_s=to,
+                )
+                actual = pathlib.Path(out_path).read_bytes()
+                pathlib.Path(out_path).unlink(missing_ok=True)
 
             if verify_gemm_output(expected_bytes, actual, m, n, args.verify_tolerance):
                 log.info("%s: PASSED", variant)
             else:
                 all_passed = False
         finally:
-            pathlib.Path(prog_path).unlink(missing_ok=True)
+            if prog_path is not None:
+                pathlib.Path(prog_path).unlink(missing_ok=True)
+
+    if tcp_client is not None:
+        tcp_client.close()
 
     return 0 if all_passed else 1
 

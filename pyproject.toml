@@ -33,7 +33,7 @@ dependencies = [
 
 [project.scripts]
 litex-upload-once = "tools.litex_upload_once:main"
-accel-e2e-gemm = "tools.test_gemm:main"
+accel-gemm = "tools.test_gemm:main"
 
 [tool.setuptools.packages.find]
 include = ["tools*"]

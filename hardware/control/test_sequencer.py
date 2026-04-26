@@ -1,6 +1,6 @@
 from amaranth.sim import Simulator
 
-from hardware.control.sequencer import Sequencer
+from hardware.control.os_sequencer import OSSequencer
 
 
 def pack_act(vals):
@@ -61,7 +61,7 @@ class TestSequencer:
             assert ctx.get(dut.act_swap) == 1
             assert ctx.get(dut.wgt_swap) == 1
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -94,7 +94,7 @@ class TestSequencer:
                 ctx.set(dut.wgt_rd_data, pack_wgt([0] * COLS))
                 await ctx.tick()
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -130,7 +130,7 @@ class TestSequencer:
             assert ctx.get(dut.arr_w_in.c0) == 15
             assert ctx.get(dut.arr_w_in.c1) == -30
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -186,7 +186,7 @@ class TestSequencer:
             # DONE
             assert ctx.get(dut.done) == 1
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -208,7 +208,7 @@ class TestSequencer:
             await run_tile(ctx, dut, K, first=False, last=True, rows=ROWS, cols=COLS)
             assert ctx.get(dut.done) == 1
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -232,7 +232,7 @@ class TestSequencer:
             assert ctx.get(dut.act_swap) == 0
             assert ctx.get(dut.wgt_swap) == 0
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
@@ -258,7 +258,7 @@ class TestSequencer:
             ctx.set(dut.start, 0)
             assert ctx.get(dut.arr_psum_load) == 1
 
-        dut = Sequencer(rows=ROWS, cols=COLS)
+        dut = OSSequencer(rows=ROWS, cols=COLS)
         sim = Simulator(dut)
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)

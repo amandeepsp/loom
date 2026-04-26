@@ -14,7 +14,7 @@ from amaranth.lib.wiring import In, Out
 from amaranth.utils import ceil_log2
 
 
-class Sequencer(wiring.Component):
+class OSSequencer(wiring.Component):
     """Output-stationary compute sequencer.
 
     Coordinates scratchpad reads, array control signals, and epilogue drain

@@ -17,7 +17,7 @@ from amaranth.lib import wiring
 from hardware.cfu import Cfu
 from hardware.memory.scratchpad import DmaWriteSignature, DoubleScratchpad
 from hardware.systolic.os_pe_array import OutputStationaryPEArray
-from hardware.control.sequencer import Sequencer
+from hardware.control.os_sequencer import OSSequencer
 from hardware.epilogue.epilogue import Epilogue, PerChannelStore
 from hardware.decoder.instructions import (
     ComputeStartInstruction,
@@ -110,15 +110,14 @@ class Top(Cfu):
         self.array = array = OutputStationaryPEArray(
             rows, cols, self.config.in_width, self.config.acc_width
         )
-        m.submodules.array = array
-
-        self.seq = seq = Sequencer(
+        self.seq = seq = OSSequencer(
             rows=rows,
             cols=cols,
             in_width=self.config.in_width,
             acc_width=self.config.acc_width,
             scratchpad_depth=self.config.store_depth,
         )
+        m.submodules.array = array
         m.submodules.seq = seq
 
         self.epi = epi = Epilogue(
@@ -128,7 +127,9 @@ class Top(Cfu):
         )
         m.submodules.epi = epi
 
-        self.params = params = PerChannelStore(depth=self.config.num_results)
+        self.params = params = PerChannelStore(
+            depth=self.config.num_results,
+        )
         m.submodules.params = params
 
         # Aliases for global config (owned by ConfigInstruction)

@@ -34,8 +34,8 @@ class TensorSpec(_IrType):
     stride: int
     dtype: int
     flags: int = 0
-    _padding: int = 0
-    _fmt = "<IHHHBB"
+    padding: int = 0
+    _fmt = "<IHHHBBI"
 
 
 @dataclass
@@ -88,7 +88,8 @@ class SetEpilogue(_IrType):
     output_offset: int = 0
     act_min: int = 0
     act_max: int = 0
-    _fmt = "<BBBHHiibb"
+    padding: int = 0
+    _fmt = "<BBBBHHbbbB"
 
 
 @dataclass
@@ -130,22 +131,22 @@ class ProgramBuilder:
         return tensor_id
 
     def tile_load_act(self, tensor_id: int, m_offset: int, k_offset: int, k_words: int) -> None:
-        self.code.extend(_pack(TileLoadAct(tensor_id, m_offset, k_offset, k_words)))
+        self.code.extend(_pack(TileLoadAct(TILE_LOAD_ACT, tensor_id, m_offset, k_offset, k_words)))
         self.instruction_count += 1
 
     def tile_load_wgt(self, tensor_id: int, n_offset: int, k_offset: int, k_words: int) -> None:
-        self.code.extend(_pack(TileLoadWgt(tensor_id, n_offset, k_offset, k_words)))
+        self.code.extend(_pack(TileLoadWgt(TILE_LOAD_WGT, tensor_id, n_offset, k_offset, k_words)))
         self.instruction_count += 1
 
     def tile_mma(self, first: bool, last: bool, k_count: int) -> None:
         flags = (1 if first else 0) | (2 if last else 0)
-        self.code.extend(_pack(TileMma(flags, k_count)))
+        self.code.extend(_pack(TileMma(TILE_MMA, flags, k_count)))
         self.instruction_count += 1
 
     def tile_store(
         self, tensor_id: int, m_offset: int, n_offset: int, m_count: int, n_count: int
     ) -> None:
-        self.code.extend(_pack(TileStore(tensor_id, m_offset, n_offset, m_count, n_count)))
+        self.code.extend(_pack(TileStore(TILE_STORE, tensor_id, m_offset, n_offset, m_count, n_count)))
         self.instruction_count += 1
 
     def set_epilogue(
@@ -162,7 +163,7 @@ class ProgramBuilder:
         self.code.extend(
             _pack(
                 SetEpilogue(
-                    bias_tid, mult_tid, shift_tid, n_offset, n_count, output_offset, act_min, act_max
+                    SET_EPILOGUE, bias_tid, mult_tid, shift_tid, n_offset, n_count, output_offset, act_min, act_max
                 )
             )
         )

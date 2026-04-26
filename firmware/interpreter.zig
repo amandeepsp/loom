@@ -210,18 +210,17 @@ fn tileLoadWgt(descs: []const ir.TensorDescriptor, inst: ir.TileLoadWgt) ExecErr
 fn tileMma(state: *PipeState, inst: ir.TileMma) void {
     if (state.compute_pending) {
         cfu.computeWait();
+        const act_dma = dma.Act.init();
+        const wgt_dma = dma.Wgt.init();
+        act_dma.stop();
+        wgt_dma.stop();
+        state.compute_pending = false;
     }
 
     const act_dma = dma.Act.init();
     const wgt_dma = dma.Wgt.init();
     act_dma.wait();
     wgt_dma.wait();
-
-    // TODO: Investigate if hardware supports this
-    if (!inst.flags.last) {
-        act_dma.setLoop(true);
-        wgt_dma.setLoop(true);
-    }
 
     cfu.computeStart(inst.flags.first, inst.flags.last, inst.k_count);
     state.compute_pending = true;

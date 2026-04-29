@@ -23,6 +23,23 @@ pub const ExecError = error{
 
 const PipeState = struct {
     compute_pending: bool = false,
+
+    /// Wait for pending compute and clear the flag.
+    /// Used between tiles where DMAs are still live for the next transfer.
+    fn computeWait(self: *PipeState) void {
+        if (self.compute_pending) {
+            cfu.computeWait();
+            self.compute_pending = false;
+        }
+    }
+
+    /// Full cleanup: wait for compute then stop DMAs.
+    /// Used at DONE and before tileStore where the pipeline ends.
+    fn computeCleanup(self: *PipeState) void {
+        self.computeWait();
+        dma.Act.stop();
+        dma.Wgt.stop();
+    }
 };
 
 const StreamContext = struct {
@@ -70,36 +87,28 @@ const StreamContext = struct {
     }
 };
 
+fn writeDebug(buf: []u8, a: u8, b: u8, c: u8, d: u8) void {
+    buf[0] = a;
+    buf[1] = b;
+    buf[2] = c;
+    buf[3] = d;
+}
+
 pub fn execute(payload_len: u16, debug_buf: ?[]u8) ExecError!u32 {
     var ctx = StreamContext.init(payload_len);
     errdefer ctx.drainRemaining();
 
     const header = try ctx.read(ir.ProgramHeader);
     if (header.magic != ir.program_magic) {
-        if (debug_buf) |buf| {
-            buf[0] = @intCast(payload_len);
-            buf[1] = @intCast(ctx.remaining);
-            buf[2] = @truncate(header.magic >> 24);
-            buf[3] = @intCast(header.version);
-        }
+        if (debug_buf) |buf| writeDebug(buf, @intCast(payload_len), @intCast(ctx.remaining), @truncate(header.magic >> 24), @intCast(header.version));
         return error.BadMagic;
     }
     if (header.version != ir.program_version) {
-        if (debug_buf) |buf| {
-            buf[0] = @intCast(payload_len);
-            buf[1] = @intCast(ctx.remaining);
-            buf[2] = @intCast(header.version);
-            buf[3] = @truncate(header.magic >> 24);
-        }
+        if (debug_buf) |buf| writeDebug(buf, @intCast(payload_len), @intCast(ctx.remaining), @intCast(header.version), @truncate(header.magic >> 24));
         return error.BadPayloadLen;
     }
     if (header.num_tensors > max_tensors) {
-        if (debug_buf) |buf| {
-            buf[0] = @intCast(payload_len);
-            buf[1] = @intCast(ctx.remaining);
-            buf[2] = header.num_tensors;
-            buf[3] = @intCast(header.version);
-        }
+        if (debug_buf) |buf| writeDebug(buf, @intCast(payload_len), @intCast(ctx.remaining), header.num_tensors, @intCast(header.version));
         return error.BadPayloadLen;
     }
 
@@ -118,11 +127,8 @@ pub fn execute(payload_len: u16, debug_buf: ?[]u8) ExecError!u32 {
     for (0..header.num_instructions) |_| {
         const opcode = try ctx.readOpcode();
         if (debug_buf) |buf| {
-            buf[0] = @intCast(payload_len);
-            buf[1] = @intCast(ctx.remaining);
-            buf[2] = @intCast(header.num_instructions);
-            buf[3] = @truncate(instr_idx);
-            buf[4] = @intFromEnum(opcode);
+            writeDebug(buf, @intCast(payload_len), @intCast(ctx.remaining), @intCast(header.num_instructions), @truncate(instr_idx));
+            if (buf.len > 4) buf[4] = @intFromEnum(opcode);
         }
         instr_idx +%= 1;
 
@@ -147,12 +153,7 @@ pub fn execute(payload_len: u16, debug_buf: ?[]u8) ExecError!u32 {
             ),
             .done => {
                 _ = try ctx.readInstruction(ir.Done, opcode);
-                if (state.compute_pending) {
-                    cfu.computeWait();
-                    dma.Act.stop();
-                    dma.Wgt.stop();
-                    state.compute_pending = false;
-                }
+                state.computeCleanup();
                 saw_done = true;
                 break;
             },
@@ -160,12 +161,7 @@ pub fn execute(payload_len: u16, debug_buf: ?[]u8) ExecError!u32 {
     }
 
     if (!saw_done or ctx.remaining != 0) {
-        if (debug_buf) |buf| {
-            buf[0] = @intCast(payload_len);
-            buf[1] = @intCast(ctx.remaining);
-            buf[2] = @intFromBool(saw_done);
-            buf[3] = @truncate(instr_idx);
-        }
+        if (debug_buf) |buf| writeDebug(buf, @intCast(payload_len), @intCast(ctx.remaining), @intFromBool(saw_done), @truncate(instr_idx));
         return error.BadPayloadLen;
     }
     return cpu_csr.mcycle.read() -% cycle_start;
@@ -207,10 +203,7 @@ fn tileLoadWgt(descs: []const ir.TensorDescriptor, inst: ir.TileLoadWgt) ExecErr
 }
 
 fn tileMma(state: *PipeState, inst: ir.TileMma) void {
-    if (state.compute_pending) {
-        cfu.computeWait();
-        state.compute_pending = false;
-    }
+    state.computeWait();
 
     dma.Act.wait();
     dma.Wgt.wait();
@@ -227,12 +220,7 @@ fn tileStore(state: *PipeState, descs: []const ir.TensorDescriptor, inst: ir.Til
     if (@as(u32, inst.m_offset) + inst.m_count > desc.dim0) return error.BadAddress;
     if (@as(u32, inst.n_offset) + inst.n_count > desc.dim1) return error.BadAddress;
 
-    if (state.compute_pending) {
-        cfu.computeWait();
-        dma.Act.stop();
-        dma.Wgt.stop();
-        state.compute_pending = false;
-    }
+    state.computeCleanup();
 
     for (0..inst.m_count) |row| {
         const row_index = @as(u32, inst.m_offset) + @as(u32, @intCast(row));

@@ -269,6 +269,9 @@ fn setEpilogue(descs: []const ir.TensorDescriptor, inst: ir.SetEpilogue) ExecErr
     if (!memory.rangeValid(mult_base, span_bytes)) return error.BadAddress;
     if (!memory.rangeValid(shift_base, span_bytes)) return error.BadAddress;
 
+    // The hardware epilogue always processes all array_rows * array_cols channels
+    // (sequencer EPILOGUE state walks the full psum grid), so we must write params
+    // for every row even when tileStore only reads m_count of them.
     for (0..array_rows) |row| {
         for (0..inst.n_count) |col| {
             const param_addr_offset = try mulU32(@as(u32, @intCast(col)), 4);

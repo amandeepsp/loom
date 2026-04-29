@@ -271,48 +271,7 @@ def plan_memory(
     )
 
 
-def build_non_pipelined_gemm_program(
-    layout: MemoryLayout,
-    m: int,
-    k: int,
-    n: int,
-    act_tensor_id: int,
-    wgt_tensor_id: int,
-    out_tensor_id: int,
-    bias_id: int,
-    mult_id: int,
-    shift_id: int,
-    tile: int = 8,
-    k_tile: int = 8,
-) -> bytes:
-    builder = ProgramBuilder()
-
-    builder.add_tensor(layout.input_addr, m, k, k * tile, DTYPE_I8)
-    builder.add_tensor(layout.weights_addr, k, n, n, DTYPE_I8)
-    builder.add_tensor(layout.output_addr, m, n, n, DTYPE_I8)
-    builder.add_tensor(layout.bias_addr, 1, n, n * 4, DTYPE_I32)
-    builder.add_tensor(layout.mult_addr, 1, n, n * 4, DTYPE_I32)
-    builder.add_tensor(layout.shift_addr, 1, n, n * 4, DTYPE_I32)
-
-    for n_base in range(0, n, tile):
-        n_count = min(tile, n - n_base)
-        for m_base in range(0, m, tile):
-            m_count = min(tile, m - m_base)
-            builder.set_epilogue(
-                bias_id, mult_id, shift_id, n_base, n_count, 0, -128, 127
-            )
-            for k_base in range(0, k, k_tile):
-                k_count = min(k_tile, k - k_base)
-                builder.tile_load_act(act_tensor_id, m_base, k_base * tile, k_count)
-                builder.tile_load_wgt(wgt_tensor_id, n_base, k_base, k_count)
-                builder.tile_mma(k_base == 0, k_base + k_count == k, k_count)
-            builder.tile_store(out_tensor_id, m_base, n_base, m_count, n_count)
-
-    builder.done()
-    return builder.build()
-
-
-def build_pipelined_gemm_program(
+def build_gemm_program(
     layout: MemoryLayout,
     m: int,
     k: int,
@@ -324,10 +283,17 @@ def build_pipelined_gemm_program(
     bias_id: int,
     mult_id: int,
     shift_id: int,
+    *,
+    k_tile: int | None = None,
     cfu_word_bits: int = 64,
     cfu_store_depth_words: int = 512,
-    k_tile: int | None = None,
 ) -> bytes:
+    """Build a GEMM KIR program.
+
+    When ``k_tile`` is omitted it is computed from scratchpad depth,
+    producing a pipelined program.  Passing a small fixed ``k_tile``
+    (e.g. 8) produces the legacy non-pipelined variant.
+    """
     if k_tile is None:
         dma_beats_per_line = cfu_word_bits // 32
         k_tile = cfu_store_depth_words // dma_beats_per_line
@@ -357,3 +323,50 @@ def build_pipelined_gemm_program(
 
     builder.done()
     return builder.build()
+
+
+# Backwards-compatible aliases
+def build_non_pipelined_gemm_program(
+    layout: MemoryLayout,
+    m: int,
+    k: int,
+    n: int,
+    act_tensor_id: int,
+    wgt_tensor_id: int,
+    out_tensor_id: int,
+    bias_id: int,
+    mult_id: int,
+    shift_id: int,
+    tile: int = 8,
+    k_tile: int = 8,
+) -> bytes:
+    """Deprecated: use ``build_gemm_program(..., k_tile=8)``."""
+    return build_gemm_program(
+        layout, m, k, n, tile, act_tensor_id, wgt_tensor_id, out_tensor_id,
+        bias_id, mult_id, shift_id, k_tile=k_tile,
+    )
+
+
+def build_pipelined_gemm_program(
+    layout: MemoryLayout,
+    m: int,
+    k: int,
+    n: int,
+    tile: int,
+    act_tensor_id: int,
+    wgt_tensor_id: int,
+    out_tensor_id: int,
+    bias_id: int,
+    mult_id: int,
+    shift_id: int,
+    cfu_word_bits: int = 64,
+    cfu_store_depth_words: int = 512,
+    k_tile: int | None = None,
+) -> bytes:
+    """Deprecated: use ``build_gemm_program(...)``."""
+    return build_gemm_program(
+        layout, m, k, n, tile, act_tensor_id, wgt_tensor_id, out_tensor_id,
+        bias_id, mult_id, shift_id,
+        k_tile=k_tile, cfu_word_bits=cfu_word_bits,
+        cfu_store_depth_words=cfu_store_depth_words,
+    )

@@ -186,21 +186,18 @@ class PerChannelStore(Component):
         m.submodules.shift_mem = shift_mem
 
         # Write ports — gate enable by wr_sel
-        wr_bias = bias_mem.write_port()
-        wr_mult = mult_mem.write_port()
-        wr_shift = shift_mem.write_port()
-
-        m.d.comb += [
-            wr_bias.addr.eq(self.wr_addr),
-            wr_bias.data.eq(self.wr_data),
-            wr_bias.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.BIAS)),
-            wr_mult.addr.eq(self.wr_addr),
-            wr_mult.data.eq(self.wr_data),
-            wr_mult.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.MULT)),
-            wr_shift.addr.eq(self.wr_addr),
-            wr_shift.data.eq(self.wr_data),
-            wr_shift.en.eq(self.wr_en & (self.wr_sel == PerChannelWriteSelect.SHIFT)),
-        ]
+        mems = {
+            PerChannelWriteSelect.BIAS: bias_mem,
+            PerChannelWriteSelect.MULT: mult_mem,
+            PerChannelWriteSelect.SHIFT: shift_mem,
+        }
+        for sel, mem in mems.items():
+            wr = mem.write_port()
+            m.d.comb += [
+                wr.addr.eq(self.wr_addr),
+                wr.data.eq(self.wr_data),
+                wr.en.eq(self.wr_en & (self.wr_sel == sel)),
+            ]
 
         # Read ports — combinational (same-cycle), aligned with sequencer epi_data
         rd_bias = bias_mem.read_port(domain="comb")

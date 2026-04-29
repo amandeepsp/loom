@@ -72,7 +72,7 @@ hw-upload-once:
 
 # Run GEMM test against real hardware.  Tunable: m, k, n, variant, verify-tolerance.
 hw-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": libaccel hw-firmware
-    uv run python -m tools.test_gemm {{ port }} {{ variant }} \
+    uv run python -m tests.test_gemm {{ port }} {{ variant }} \
         --m {{ m }} --k {{ k }} --n {{ n }} \
         --cfu-word-bits $(({{ cfu_rows }} * {{ cfu_in_width }})) \
         --cfu-store-depth-words {{ cfu_store_depth }} \
@@ -158,8 +158,8 @@ _sim_args := "--sim-arg=--cfu-rows --sim-arg=" + cfu_rows + " " \
 
 # GEMM regression test on Verilator simulation.  Tunable: m, k, n, variant, tolerance.
 sim-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": sim-firmware
-    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
-        uv run python -m tools.test_gemm \
+    uv run python -m tests.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
+        uv run python -m tests.test_gemm \
             tcp://127.0.0.1:{{ sim_port }} {{ variant }} \
             --m {{ m }} --k {{ k }} --n {{ n }} \
             --cfu-word-bits $(({{ cfu_rows }} * {{ cfu_in_width }})) \
@@ -168,16 +168,9 @@ sim-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": sim-firmware
             --verify-tolerance {{ verify-tolerance }}
 
 # TVM path MNIST inference on Verilator simulation.
-sim-tvm verify-tolerance="1": sim-firmware
-    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
-        uv run python tools/tvm_sim_test.py \
-            --tcp tcp://127.0.0.1:{{ sim_port }} \
-            --verify-tolerance {{ verify-tolerance }} \
-            --driver-timeout 1800
+sim-tvm: sim-firmware
+    uv run pytest tests/test_sim.py::test_sim_gemm -v --run-sim
 
 # Full TVM pipeline (ONNX → Relax → patterns → codegen → sim execution).
 sim-tvm-pipeline: sim-firmware
-    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
-        uv run python tools/test_tvm_pipeline.py \
-            --tcp tcp://127.0.0.1:{{ sim_port }} \
-            --driver-timeout 1800
+    uv run pytest tests/test_sim.py::test_sim_pipeline -v --run-sim

@@ -33,14 +33,13 @@ dependencies = [
 
 [project.scripts]
 litex-upload-once = "tools.litex_upload_once:main"
-accel-gemm = "tools.test_gemm:main"
 
 [tool.setuptools.packages.find]
 include = ["tools*"]
 namespaces = true
 
 [tool.pytest.ini_options]
-testpaths = ["hardware", "hardware/systolic", "hardware/memory", "hardware/epilogue"]
+testpaths = ["hardware", "hardware/systolic", "hardware/memory", "hardware/epilogue", "tests"]
 pythonpath = ["."]
 addopts = ["--ignore=hardware/experiments"]
 

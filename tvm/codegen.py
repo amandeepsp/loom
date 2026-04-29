@@ -8,7 +8,10 @@ import numpy as np
 import tvm
 from tvm import relax
 
-from patterns import ACCEL_CODEGEN_NAME
+from runtime import _load_local_module
+
+_patterns = _load_local_module("patterns", "patterns.py")
+ACCEL_CODEGEN_NAME = _patterns.ACCEL_CODEGEN_NAME
 from shared.ir import ACCEL_EXTERN_PREFIX
 
 COMPOSITE_CONSTANTS: dict[str, dict[str, Any]] = {}
@@ -64,17 +67,6 @@ def _check_weight_permute(func: relax.Function) -> bool:
                 if dq_arr.dtype in (np.int8, np.uint8) and dq_arr.ndim == 2:
                     return True
         return False
-
-    def find_all_nested(expr):
-        if isinstance(expr, relax.SeqExpr):
-            for block in expr.blocks:
-                for binding in block.bindings:
-                    find_all_nested(binding.value)
-        elif isinstance(expr, relax.Function):
-            if _check_nested(expr):
-                return True
-            if hasattr(expr, "body"):
-                find_all_nested(expr.body)
 
     found = [False]
     def find(expr):

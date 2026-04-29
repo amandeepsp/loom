@@ -7,31 +7,12 @@ repository would shadow the upstream TVM install from `../tvm`.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from typing import Any
 
 import tvm
 from tvm import relax
 
-
-def _load_local_module(name: str, filename: str) -> Any:
-    """Load a sibling module from the local `tvm/` integration directory."""
-
-    path = Path(__file__).with_name(filename)
-    module_name = f"accel_local_{name}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"unable to load local module from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+from runtime import _load_local_module
 
 
 def _as_int(value: Any) -> int | None:

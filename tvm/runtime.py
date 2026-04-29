@@ -14,7 +14,6 @@ from tvm.relax.expr_functor import PyExprVisitor, visitor
 
 import importlib.util
 import sys
-from pathlib import Path
 
 from shared.ir import build_pipelined_gemm_program, plan_memory
 
@@ -708,7 +707,6 @@ def _make_accel_packed(symbol: str, runtime: AccelRuntime):
             _copy_result_to_output(out, result_copy)
             return None
 
-        import sys
         print(f"[_packed] {symbol[-40:]}: M={m}K={k}N={n} result=[{result.min()},{result.max()}] epi(off={output_offset},min={act_min},max={act_max}) mult=[{multiplier.min()},{multiplier.max()}] shift=[{shift.min()},{shift.max()}] bias=[{bias.min()},{bias.max()}]", file=sys.stderr)
         return tvm.runtime.tensor(result_copy)
 

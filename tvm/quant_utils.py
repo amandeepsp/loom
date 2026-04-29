@@ -2,20 +2,9 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
-
-
-@dataclass
-class EpilogueParams:
-    """Hardware epilogue parameters for a single output channel."""
-
-    bias: np.int32
-    multiplier: np.int32
-    shift: np.int32
 
 
 @dataclass
@@ -135,10 +124,9 @@ def compute_requantization_params(
     multipliers = np.zeros(n, dtype=np.float64)
     shifts = np.zeros(n, dtype=np.int32)
 
-    for i in range(n):
-        mult, shift = quantize_multiplier_less_than_one(combined_scale)
-        multipliers[i] = mult
-        shifts[i] = shift
+    mult, shift = quantize_multiplier_less_than_one(combined_scale)
+    multipliers.fill(mult)
+    shifts.fill(shift)
 
     output_offset = np.int8(output_zero_point)
 
@@ -165,55 +153,4 @@ def compute_requantization_params(
     )
 
 
-def compute_scale_multiplier_shift(
-    input_scale: float,
-    weight_scale: float,
-    output_scale: float,
-) -> tuple[np.int32, np.int32]:
-    """Compute a single multiplier/shift for uniform-scale layers.
 
-    For per-tensor quantization where all channels share the same scale.
-    """
-    combined_scale = (input_scale * weight_scale) / output_scale
-    return quantize_multiplier_less_than_one(combined_scale)
-
-
-def extract_quant_params_from_relax_constant(
-    expr: Any,
-) -> tuple[float, int] | None:
-    """Extract scale and zero_point from a Relax Constant expression.
-
-    Returns (scale, zero_point) if the expression is a scalar Constant,
-    None otherwise.
-    """
-    from tvm import relax
-
-    if isinstance(expr, relax.Constant):
-        arr = expr.data.numpy()
-        if arr.ndim == 0:
-            return float(arr.item()), 0
-        elif arr.size == 1:
-            return float(arr.flatten()[0]), 0
-    return None
-
-
-def extract_quant_params_from_ndarray(
-    data: Any,
-) -> tuple[float, int] | None:
-    """Extract scale and zero_point from an NDArray or numpy array.
-
-    Returns (scale, zero_point) if the data is a scalar,
-    None otherwise.
-    """
-    if hasattr(data, "numpy"):
-        arr = data.numpy()
-    elif isinstance(data, np.ndarray):
-        arr = data
-    else:
-        return None
-
-    if arr.ndim == 0:
-        return float(arr.item()), 0
-    elif arr.size == 1:
-        return float(arr.flatten()[0]), 0
-    return None

@@ -35,7 +35,13 @@ class TensorSpec(_IrType):
     dtype: int
     flags: int = 0
     padding: int = 0
-    _fmt = "<IHHHBBI"
+    _struct = struct.Struct("<IHHHBBI")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(
+            self.base_addr, self.dim0, self.dim1, self.stride,
+            self.dtype, self.flags, self.padding,
+        )
 
 
 @dataclass
@@ -45,7 +51,12 @@ class TileLoadAct(_IrType):
     m_offset: int = 0
     k_offset: int = 0
     k_words: int = 0
-    _fmt = "<BBHHH"
+    _struct = struct.Struct("<BBHHH")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(
+            self.opcode, self.tensor_id, self.m_offset, self.k_offset, self.k_words,
+        )
 
 
 @dataclass
@@ -55,7 +66,12 @@ class TileLoadWgt(_IrType):
     n_offset: int = 0
     k_offset: int = 0
     k_words: int = 0
-    _fmt = "<BBHHH"
+    _struct = struct.Struct("<BBHHH")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(
+            self.opcode, self.tensor_id, self.n_offset, self.k_offset, self.k_words,
+        )
 
 
 @dataclass
@@ -63,7 +79,10 @@ class TileMma(_IrType):
     opcode: int = TILE_MMA
     flags: int = 0
     k_count: int = 0
-    _fmt = "<BBH"
+    _struct = struct.Struct("<BBH")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(self.opcode, self.flags, self.k_count)
 
 
 @dataclass
@@ -74,7 +93,13 @@ class TileStore(_IrType):
     n_offset: int = 0
     m_count: int = 0
     n_count: int = 0
-    _fmt = "<BBHHBB"
+    _struct = struct.Struct("<BBHHBB")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(
+            self.opcode, self.tensor_id, self.m_offset, self.n_offset,
+            self.m_count, self.n_count,
+        )
 
 
 @dataclass
@@ -89,7 +114,14 @@ class SetEpilogue(_IrType):
     act_min: int = 0
     act_max: int = 0
     padding: int = 0
-    _fmt = "<BBBBHHbbbB"
+    _struct = struct.Struct("<BBBBHHbbbB")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(
+            self.opcode, self.bias_tid, self.mult_tid, self.shift_tid,
+            self.n_offset, self.n_count, self.output_offset, self.act_min,
+            self.act_max, self.padding,
+        )
 
 
 @dataclass
@@ -98,23 +130,25 @@ class Done(_IrType):
     pad0: int = 0
     pad1: int = 0
     pad2: int = 0
-    _fmt = "<BBBB"
+    _struct = struct.Struct("<BBBB")
+
+    def pack(self) -> bytes:
+        return self._struct.pack(self.opcode, self.pad0, self.pad1, self.pad2)
 
 
 _INSTRUCTION_SIZES = {
-    TILE_LOAD_ACT: struct.calcsize(TileLoadAct._fmt),
-    TILE_LOAD_WGT: struct.calcsize(TileLoadWgt._fmt),
-    TILE_MMA: struct.calcsize(TileMma._fmt),
-    TILE_STORE: struct.calcsize(TileStore._fmt),
-    SET_EPILOGUE: struct.calcsize(SetEpilogue._fmt),
-    DONE: struct.calcsize(Done._fmt),
+    TILE_LOAD_ACT: TileLoadAct._struct.size,
+    TILE_LOAD_WGT: TileLoadWgt._struct.size,
+    TILE_MMA: TileMma._struct.size,
+    TILE_STORE: TileStore._struct.size,
+    SET_EPILOGUE: SetEpilogue._struct.size,
+    DONE: Done._struct.size,
 }
 
 
 def _pack(ir_type: _IrType) -> bytes:
-    fields = [f for f in ir_type.__dataclass_fields__ if not f.startswith("_")]
-    vals = [getattr(ir_type, f) for f in fields]
-    return struct.pack(ir_type._fmt, *vals)
+    """Deprecated: use ir_type.pack() directly."""
+    return ir_type.pack()
 
 
 def patch_epilogue(
@@ -171,22 +205,22 @@ class ProgramBuilder:
         return tensor_id
 
     def tile_load_act(self, tensor_id: int, m_offset: int, k_offset: int, k_words: int) -> None:
-        self.code.extend(_pack(TileLoadAct(TILE_LOAD_ACT, tensor_id, m_offset, k_offset, k_words)))
+        self.code.extend(TileLoadAct(TILE_LOAD_ACT, tensor_id, m_offset, k_offset, k_words).pack())
         self.instruction_count += 1
 
     def tile_load_wgt(self, tensor_id: int, n_offset: int, k_offset: int, k_words: int) -> None:
-        self.code.extend(_pack(TileLoadWgt(TILE_LOAD_WGT, tensor_id, n_offset, k_offset, k_words)))
+        self.code.extend(TileLoadWgt(TILE_LOAD_WGT, tensor_id, n_offset, k_offset, k_words).pack())
         self.instruction_count += 1
 
     def tile_mma(self, first: bool, last: bool, k_count: int) -> None:
         flags = (1 if first else 0) | (2 if last else 0)
-        self.code.extend(_pack(TileMma(TILE_MMA, flags, k_count)))
+        self.code.extend(TileMma(TILE_MMA, flags, k_count).pack())
         self.instruction_count += 1
 
     def tile_store(
         self, tensor_id: int, m_offset: int, n_offset: int, m_count: int, n_count: int
     ) -> None:
-        self.code.extend(_pack(TileStore(TILE_STORE, tensor_id, m_offset, n_offset, m_count, n_count)))
+        self.code.extend(TileStore(TILE_STORE, tensor_id, m_offset, n_offset, m_count, n_count).pack())
         self.instruction_count += 1
 
     def set_epilogue(
@@ -201,16 +235,15 @@ class ProgramBuilder:
         act_max: int,
     ) -> None:
         self.code.extend(
-            _pack(
-                SetEpilogue(
-                    SET_EPILOGUE, bias_tid, mult_tid, shift_tid, n_offset, n_count, output_offset, act_min, act_max
-                )
-            )
+            SetEpilogue(
+                SET_EPILOGUE, bias_tid, mult_tid, shift_tid, n_offset, n_count,
+                output_offset, act_min, act_max,
+            ).pack()
         )
         self.instruction_count += 1
 
     def done(self) -> None:
-        self.code.extend(_pack(Done()))
+        self.code.extend(Done().pack())
         self.instruction_count += 1
 
     def build(self) -> bytes:
@@ -220,7 +253,7 @@ class ProgramBuilder:
         program.append(len(self.tensors))
         program.extend(struct.pack("<H", self.instruction_count))
         for t in self.tensors:
-            program.extend(_pack(t))
+            program.extend(t.pack())
         program.extend(self.code)
         return bytes(program)
 

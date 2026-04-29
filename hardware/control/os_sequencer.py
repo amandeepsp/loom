@@ -10,6 +10,7 @@ An external Epilogue module consumes them.
 
 from amaranth import Array, Module, Signal, signed
 from amaranth.lib import data, wiring
+from amaranth.lib.enum import IntEnum
 from amaranth.lib.wiring import In, Out
 from amaranth.utils import ceil_log2
 
@@ -181,16 +182,24 @@ class OSSequencer(wiring.Component):
                     m.d.sync += first_latch.eq(self.first)
                     m.next = "PRIME"
 
+        class SeqState(IntEnum):
+            IDLE = 0
+            PRIME = 1
+            FEED = 2
+            FLUSH = 3
+            EPILOGUE = 4
+            EPILOGUE_WAIT = 5
+            DONE = 6
+
         m.d.comb += [
             self.state_debug.eq(
-                fsm.ongoing("IDLE") * 0
-                | fsm.ongoing("PRIME") * 1
-                | fsm.ongoing("FEED") * 2
-                | fsm.ongoing("FLUSH") * 3
-                | fsm.ongoing("EPILOGUE") * 4
-                | fsm.ongoing("EPILOGUE_WAIT") * 5
-                | fsm.ongoing("DONE") * 6
-                | fsm.ongoing("WAIT_START_DEASSERT") * 7
+                fsm.ongoing("IDLE") * SeqState.IDLE
+                | fsm.ongoing("PRIME") * SeqState.PRIME
+                | fsm.ongoing("FEED") * SeqState.FEED
+                | fsm.ongoing("FLUSH") * SeqState.FLUSH
+                | fsm.ongoing("EPILOGUE") * SeqState.EPILOGUE
+                | fsm.ongoing("EPILOGUE_WAIT") * SeqState.EPILOGUE_WAIT
+                | fsm.ongoing("DONE") * SeqState.DONE
             ),
             self.busy_debug.eq(~fsm.ongoing("IDLE")),
             self.first_latch_debug.eq(first_latch),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes as ct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,38 +13,13 @@ import tvm
 from tvm import relax
 from tvm.relax.expr_functor import PyExprVisitor, visitor
 
-import importlib.util
-import sys
-
 from shared.ir import build_gemm_program, patch_epilogue, plan_memory
+
+from .codegen import get_composite_constants
+from .quant_utils import quantize_multiplier_less_than_one
 
 TENSOR_POOL_BASE = 0x40010000
 MEM_ALIGN = 32
-
-
-def _load_local_module(name: str, filename: str) -> Any:
-    path = Path(__file__).with_name(filename)
-    module_name = f"accel_local_{name}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"unable to load local module from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-quant_utils = _load_local_module("quant_utils", "quant_utils.py")
-compute_requantization_params = quant_utils.compute_requantization_params
-LayerEpilogueParams = quant_utils.LayerEpilogueParams
-quantize_multiplier_less_than_one = quant_utils.quantize_multiplier_less_than_one
-
-codegen = _load_local_module("codegen", "codegen.py")
-get_composite_constants = codegen.get_composite_constants
 
 
 class AccelRuntimeError(RuntimeError):
@@ -265,18 +241,6 @@ def _as_i32_vector(value: Any, *, name: str, length: int) -> np.ndarray:
     return np.ascontiguousarray(arr)
 
 
-def compute_reference_matmul(lhs: Any, rhs: Any) -> np.ndarray:
-    """Compute the current `matmul_integer` composite semantics on CPU."""
-
-    lhs_arr = np.asarray(lhs, dtype=np.int32)
-    rhs_arr = np.asarray(rhs, dtype=np.int32)
-    if lhs_arr.ndim != 2 or rhs_arr.ndim != 2:
-        raise ValueError(
-            f"reference matmul expects rank-2 inputs, got {lhs_arr.shape} and {rhs_arr.shape}"
-        )
-    return np.ascontiguousarray(lhs_arr @ rhs_arr, dtype=np.int32)
-
-
 # Transport union: either TCP or serial
 AccelTransport = TcpTransport | SerialTransport
 
@@ -452,26 +416,6 @@ def _copy_result_to_output(out: Any, result: np.ndarray) -> None:
     raise TypeError(f"unsupported DPS output object: {type(out)!r}")
 
 
-def _make_cpu_packed(symbol: str):
-    """Create a CPU packed function for the current matmul-core boundary."""
-
-    def _packed(*args):
-        if len(args) not in (2, 3):
-            raise ValueError(f"{symbol} expects 2 or 3 arguments, got {len(args)}")
-
-        lhs, rhs = args[0], args[1]
-        result = compute_reference_matmul(lhs.numpy(), rhs.numpy())
-
-        if len(args) == 2:
-            return tvm.runtime.tensor(result)
-
-        out = args[2]
-        _copy_result_to_output(out, result)
-        return None
-
-    return _packed
-
-
 def _make_accel_packed(symbol: str, runtime: AccelRuntime):
     """Create an accelerator-backed packed function.
 
@@ -529,36 +473,35 @@ def _make_accel_packed(symbol: str, runtime: AccelRuntime):
         if k != rk:
             raise ValueError(f"{symbol}: incompatible shapes lhs {lhs_arr.shape} x weight {weight_arr.shape}")
 
-
-        if compute_requantization_params and LayerEpilogueParams:
-            epi_params = compute_requantization_params(
-                input_scale=input_scale,
-                input_zero_point=input_zp,
-                weight_scale=weight_scale,
-                weight_zero_point=weight_zp,
-                output_scale=output_scale,
-                output_zero_point=output_zp,
-                bias_fp32=bias_arr.astype(np.float32) * float(constants.get("bias_scale", 1.0)),
-                has_relu=False,
-                activation_is_signed=True,
+        # Compute epilogue params directly for our hardware.
+        #
+        # The hardware computes pure integer matmul without subtracting zero points:
+        #     acc_hw[m,n] = sum_k x_q[m,k] * w_q[k,n]
+        # but the QDQ math requires:
+        #     acc_true[m,n] = sum_k (x_q[m,k] - x_zp) * (w_q[k,n] - w_zp)
+        # With w_zp = 0 (typical for symmetric per-channel weights):
+        #     acc_true = acc_hw - x_zp * sum_k w_q[k,n]
+        # Fold this correction into the bias (constant per output channel):
+        #     bias_hw[n] = bias_onnx[n] - x_zp * sum_k w_q[k,n]
+        #
+        # ONNX bias is already quantized as round(bias_fp32 / (input_scale * weight_scale)),
+        # which is exactly the scale the hardware epilogue expects.
+        if int(weight_zp) != 0:
+            raise NotImplementedError(
+                f"{symbol}: nonzero weight_zp ({weight_zp}) not yet supported"
             )
-            bias = epi_params.bias
-            multiplier = epi_params.multiplier
-            shift = epi_params.shift
-            output_offset = epi_params.output_offset
-            act_min = epi_params.activation_min
-            act_max = epi_params.activation_max
-        else:
-            combined_scale = (input_scale * weight_scale) / output_scale
-            mult, shft = quantize_multiplier_less_than_one(combined_scale)
-            mult = int(mult)
-            shft = int(shft)
-            bias = np.full(n, 0, dtype=np.int32)
-            multiplier = np.full(n, mult, dtype=np.int32)
-            shift = np.full(n, shft, dtype=np.int32)
-            output_offset = np.int8(output_zp)
-            act_min = np.int8(-128)
-            act_max = np.int8(127)
+        combined_scale = (input_scale * weight_scale) / output_scale
+        mult, shft = quantize_multiplier_less_than_one(combined_scale)
+        mult = int(mult)
+        shft = int(shft)
+
+        sum_w = weight_arr.astype(np.int32).sum(axis=0)  # shape [N]
+        bias = (bias_arr - int(input_zp) * sum_w).astype(np.int32)
+        multiplier = np.full(n, mult, dtype=np.int32)
+        shift = np.full(n, shft, dtype=np.int32)
+        output_offset = np.int8(output_zp)
+        act_min = np.int8(-128)
+        act_max = np.int8(127)
 
         result = runtime.execute_tile(
             lhs=lhs_arr,
@@ -571,54 +514,43 @@ def _make_accel_packed(symbol: str, runtime: AccelRuntime):
             activation_max=int(act_max),
         )
 
-        # Explicit contiguous copy to ensure proper memory lifetime.
-        result_copy = np.ascontiguousarray(result.astype(np.float32))
+        # The accel returns int8, but the Relax composite expects float32
+        # because it ends with a dequantize node.  Dequantize before returning.
+        result_float = (result.astype(np.float32) - float(output_zp)) * float(output_scale)
+        result_copy = np.ascontiguousarray(result_float)
 
         if len(args) >= 2:
             out = args[1]
             _copy_result_to_output(out, result_copy)
             return None
 
-        print(f"[_packed] {symbol[-40:]}: M={m}K={k}N={n} result=[{result.min()},{result.max()}] epi(off={output_offset},min={act_min},max={act_max}) mult=[{multiplier.min()},{multiplier.max()}] shift=[{shift.min()},{shift.max()}] bias=[{bias.min()},{bias.max()}]", file=sys.stderr)
         return tvm.runtime.tensor(result_copy)
 
     return _packed
 def register_runtime_functions(
     mod: tvm.IRModule,
     *,
-    mode: str = "cpu",
     runtime: AccelRuntime | None = None,
     override: bool = True,
 ) -> list[str]:
-    """Register packed runtime functions referenced by a lowered Relax module.
+    """Register accelerator-backed packed functions referenced by a lowered Relax module.
 
     Parameters
     ----------
     mod:
         Lowered Relax module that contains `call_dps_packed` extern calls.
-    mode:
-        Registration mode. `cpu` registers correct reference implementations for
-        the current matmul-core boundary. `accel` installs fast-fail stubs until
-        the composite boundary includes hardware epilogue semantics.
     runtime:
-        Optional accelerator runtime instance for future accelerator-backed
-        registration. Required when `mode="accel"`.
+        Accelerator runtime instance. Created automatically when omitted.
     override:
         Passed through to `tvm.register_global_func`.
     """
 
     symbols = collect_extern_symbols(mod)
-    if mode not in {"cpu", "accel"}:
-        raise ValueError(f"unsupported runtime mode: {mode}")
-    if mode == "accel" and runtime is None:
+    if runtime is None:
         runtime = create_runtime()
 
     for symbol in symbols:
-        if mode == "cpu":
-            packed = _make_cpu_packed(symbol)
-        else:
-            assert runtime is not None
-            packed = _make_accel_packed(symbol, runtime)
+        packed = _make_accel_packed(symbol, runtime)
         tvm.register_global_func(symbol, packed, override=override)
 
     return symbols

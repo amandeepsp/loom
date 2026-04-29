@@ -43,7 +43,7 @@ class Epilogue(Component):
             "first_in": In(1),
             "last_in": In(1),
             # Per-channel params
-            "bias": In(signed(18)),
+            "bias": In(signed(32)),
             "multiplier": In(signed(32)),
             "shift": In(unsigned(5)),
             # Per-layer params (constant across tile)
@@ -139,7 +139,7 @@ class Epilogue(Component):
 
 PerChannelParamLayout = StructLayout(
     {
-        "bias": signed(18),
+        "bias": signed(32),
         "multiplier": signed(32),
         "shift": unsigned(5),
     }
@@ -169,7 +169,7 @@ class PerChannelStore(Component):
             "wr_en": In(1),
             # Read port
             "rd_addr": In(range(depth)),
-            "bias": Out(signed(18)),
+            "bias": Out(signed(32)),
             "multiplier": Out(signed(32)),
             "shift": Out(unsigned(5)),
         }
@@ -178,7 +178,7 @@ class PerChannelStore(Component):
     def elaborate(self, _platform):
         m = Module()
 
-        bias_mem = Memory(shape=signed(18), depth=self.depth, init=[])
+        bias_mem = Memory(shape=signed(32), depth=self.depth, init=[])
         mult_mem = Memory(shape=signed(32), depth=self.depth, init=[])
         shift_mem = Memory(shape=unsigned(5), depth=self.depth, init=[])
         m.submodules.bias_mem = bias_mem

@@ -176,9 +176,8 @@ sim-tvm verify-tolerance="1": sim-firmware
             --driver-timeout 1800
 
 # Full TVM pipeline (ONNX → Relax → patterns → codegen → sim execution).
-sim-tvm-pipeline enable-tiling="": sim-firmware
+sim-tvm-pipeline: sim-firmware
     uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
         uv run python tools/test_tvm_pipeline.py \
             --tcp tcp://127.0.0.1:{{ sim_port }} \
-            --driver-timeout 1800 \
-            {{ enable-tiling }}
+            --driver-timeout 1800

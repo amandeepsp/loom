@@ -91,28 +91,21 @@ class Cfu(Elaboratable):
         self.cfu_instr_debug = Signal(3, name="cfu_instr_debug")
         self.cfu_busy_debug = Signal(name="cfu_busy_debug")
 
-        self.lram_addr = [Signal(32, name=f"port{i}_addr") for i in range(4)]
-        self.lram_data = [Signal(32, name=f"port{i}_din") for i in range(4)]
-
-        self.ports = (
-            [
-                self.cmd_valid,
-                self.cmd_ready,
-                self.cmd_function_id.as_value(),
-                self.cmd_in0,
-                self.cmd_in1,
-                self.rsp_valid,
-                self.rsp_ready,
-                self.rsp_out,
-                self.cfu_state_debug,
-                self.cfu_instr_debug,
-                self.cfu_busy_debug,
-                # self.reset is exposed as the sync domain reset via
-                # ClockSignal/ResetSignal in the convert() ports list.
-            ]
-            + self.lram_addr
-            + self.lram_data
-        )
+        self.ports = [
+            self.cmd_valid,
+            self.cmd_ready,
+            self.cmd_function_id.as_value(),
+            self.cmd_in0,
+            self.cmd_in1,
+            self.rsp_valid,
+            self.rsp_ready,
+            self.rsp_out,
+            self.cfu_state_debug,
+            self.cfu_instr_debug,
+            self.cfu_busy_debug,
+            # self.reset is exposed as the sync domain reset via
+            # ClockSignal/ResetSignal in the convert() ports list.
+        ]
 
     def elab_instructions(self, m):
         """

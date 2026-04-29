@@ -113,7 +113,7 @@ When tuning hardware, update Justfile variables — they propagate to both Veril
 - `host/driver.zig`: Host-side serial communication + CFU instruction dispatch.
 - `host/c_api.zig`: C FFI surface (`libaccel.so`) — `accel_open`, `accel_exec`, `accel_write_mem`, etc.
 - `firmware/interpreter.zig`: Firmware IR interpreter (executes instructions, drives DMA, sequencer).
-- `tools/ir.py`: Legacy IR bytecode builder (used by `tools/test_gemm.py`).
+- `tools/ir.py`: ~~Legacy IR bytecode builder~~ (deleted; functionality merged into `shared/ir.py`).
 
 Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, `firmware/interpreter.zig`, `host/driver.zig`.
 

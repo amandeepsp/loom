@@ -175,13 +175,6 @@ sim-tvm verify-tolerance="1": sim-firmware
             --verify-tolerance {{ verify-tolerance }} \
             --driver-timeout 1800
 
-# Layer 0 in isolation — helps isolate multi-layer state leakage bugs.
-sim-layer0: sim-firmware
-    uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
-        uv run python tools/test_layer0_isolated.py \
-            --tcp tcp://127.0.0.1:{{ sim_port }} \
-            --driver-timeout 1800
-
 # Full TVM pipeline (ONNX → Relax → patterns → codegen → sim execution).
 sim-tvm-pipeline enable-tiling="": sim-firmware
     uv run python -m tools.sim_run --port {{ sim_port }} {{ _sim_args }} -- \

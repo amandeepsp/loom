@@ -159,9 +159,13 @@ pub export fn loom_exec(
 }
 
 pub export fn loom_status_string(code: c_int) [*:0]const u8 {
-    if (std.meta.intToEnum(LoomStatus, code)) |status| {
-        return status.describe();
-    } else |_| {
-        return "unknown status";
-    }
+    const status: LoomStatus = switch (code) {
+        @intFromEnum(LoomStatus.ok) => .ok,
+        @intFromEnum(LoomStatus.invalid_argument) => .invalid_argument,
+        @intFromEnum(LoomStatus.io_error) => .io_error,
+        @intFromEnum(LoomStatus.protocol_error) => .protocol_error,
+        @intFromEnum(LoomStatus.device_error) => .device_error,
+        else => return "unknown status",
+    };
+    return status.describe();
 }

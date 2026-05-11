@@ -136,7 +136,12 @@ pub fn build(b: *std.Build) void {
 
     // Parse CSR addresses from LiteX csr.json (optional, only needed for firmware)
     const csr_options = b.addOptions();
-    const maybe_contents: ?[]u8 = root_dir.readFileAlloc(b.allocator, csr_json_path, 4 * 1024 * 1024) catch null;
+    const maybe_contents: ?[]u8 = root_dir.readFileAlloc(
+        b.graph.io,
+        csr_json_path,
+        b.allocator,
+        .limited(4 * 1024 * 1024),
+    ) catch null;
     if (maybe_contents) |contents| {
         const parsed = std.json.parseFromSlice(std.json.Value, b.allocator, contents, .{}) catch return;
         if (parsed.value.object.get("csr_registers")) |regs| {
@@ -164,7 +169,7 @@ pub fn build(b: *std.Build) void {
         .name = "firmware",
         .root_module = fw_mod,
     });
-    fw_exe.addObjectFile(b.path(crt0_path));
+    fw_exe.root_module.addObjectFile(b.path(crt0_path));
     fw_exe.setLinkerScript(b.path("firmware/linker.ld"));
     b.installArtifact(fw_exe);
 

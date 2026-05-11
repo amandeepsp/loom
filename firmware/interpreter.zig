@@ -63,7 +63,15 @@ const StreamContext = struct {
 
         const raw = uart.readByte();
         self.remaining -= 1;
-        return std.meta.intToEnum(ir.InstructionType, raw) catch error.BadPayloadLen;
+        return switch (raw) {
+            @intFromEnum(ir.InstructionType.tile_load_act) => .tile_load_act,
+            @intFromEnum(ir.InstructionType.tile_load_wgt) => .tile_load_wgt,
+            @intFromEnum(ir.InstructionType.tile_mma) => .tile_mma,
+            @intFromEnum(ir.InstructionType.tile_store) => .tile_store,
+            @intFromEnum(ir.InstructionType.set_epilogue) => .set_epilogue,
+            @intFromEnum(ir.InstructionType.done) => .done,
+            else => error.BadPayloadLen,
+        };
     }
 
     fn readInstruction(self: *StreamContext, comptime T: type, opcode: ir.InstructionType) ExecError!T {

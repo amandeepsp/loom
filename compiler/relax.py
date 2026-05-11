@@ -14,7 +14,7 @@ def lower_pipeline(mod: tvm.IRModule) -> tvm.IRModule:
     Pipeline: partition → lower loom regions → LambdaLift.
     """
     mod = patterns.partition_for_loom_cfu(mod)
-    mod = codegen.lower_accel_regions(mod)
+    mod = codegen.lower_loom_regions(mod)
     mod = relax.transform.LambdaLift()(mod)
     return mod
 

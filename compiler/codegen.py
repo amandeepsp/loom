@@ -8,7 +8,7 @@ import numpy as np
 import tvm
 from tvm import relax
 
-from .patterns import ACCEL_CODEGEN_NAME
+from .patterns import LOOM_CODEGEN_NAME
 from shared.ir import LOOM_EXTERN_PREFIX
 
 COMPOSITE_CONSTANTS: dict[str, dict[str, Any]] = {}
@@ -155,7 +155,7 @@ class _LoomRegionLowerer(relax.PyExprMutator):
             if (
                 isinstance(func, relax.Function)
                 and hasattr(func, "attrs")
-                and str(func.attrs.get("Codegen", "")) == ACCEL_CODEGEN_NAME
+                and str(func.attrs.get("Codegen", "")) == LOOM_CODEGEN_NAME
             ):
                 self._codegen_constants[gv] = _extract_composite_constants(func)
 
@@ -235,7 +235,7 @@ class _LoomRegionLowerer(relax.PyExprMutator):
         attrs = target.attrs
         if not attrs or "Codegen" not in attrs:
             return call
-        if str(attrs["Codegen"]) != ACCEL_CODEGEN_NAME:
+        if str(attrs["Codegen"]) != LOOM_CODEGEN_NAME:
             return call
 
         extern_symbol = make_extern_symbol(call.op)

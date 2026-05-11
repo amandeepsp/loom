@@ -151,18 +151,21 @@ def main() -> int:
 
     image = pathlib.Path(args.kernel).read_bytes()
 
-    if args.reset_command:
-        print(f"[upload-once] Running reset command: {args.reset_command}")
-        subprocess.run(args.reset_command, shell=True, check=True)
-        time.sleep(0.5)
-
     with open_port(args.port, args.speed) as port:
         port.reset_input_buffer()
         port.reset_output_buffer()
 
+        if args.reset_command:
+            print(f"[upload-once] Running reset command: {args.reset_command}")
+            subprocess.run(args.reset_command, shell=True, check=True)
+            time.sleep(0.5)
+            port.reset_input_buffer()
+            port.reset_output_buffer()
+
         try:
             wait_for_magic(port, args.boot_timeout)
             port.write(SFL_MAGIC_ACK)
+            port.flush()
             upload_image(port, image, args.base, args.chunk_size, args.ack_timeout)
             jump_to_image(port, args.base, args.ack_timeout)
             print("[upload-once] Jumped to uploaded image.")

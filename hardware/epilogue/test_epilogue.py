@@ -258,11 +258,11 @@ class TestPerChannelStore:
                 ctx.set(dut.wr_en, 1)
                 await ctx.tick()
 
-            # Write channel 1: bias=-50, mult=0x60000000, shift=5
+            # Write channel 1: bias=-50, mult=0x60000000, shift=42
             for sel, val in [
                 (PerChannelWriteSelect.BIAS, -50),
                 (PerChannelWriteSelect.MULT, 0x60000000),
-                (PerChannelWriteSelect.SHIFT, 5),
+                (PerChannelWriteSelect.SHIFT, 42),
             ]:
                 ctx.set(dut.wr_addr, 1)
                 ctx.set(dut.wr_sel, sel)
@@ -284,7 +284,7 @@ class TestPerChannelStore:
             await ctx.tick()
             assert ctx.get(dut.bias) == -50
             assert ctx.get(dut.multiplier) == 0x60000000
-            assert ctx.get(dut.shift) == 5
+            assert ctx.get(dut.shift) == 42
 
         dut = PerChannelStore(depth=DEPTH)
         sim = Simulator(dut)

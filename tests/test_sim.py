@@ -1,4 +1,4 @@
-"""Verilator simulation tests: layer-by-layer GEMM and full ONNX→VM pipeline."""
+"""Verilator simulation tests: layer-by-layer GEMM and full model-binary pipeline."""
 
 import logging
 import sys
@@ -10,10 +10,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from compiler import LoomRuntime, RuntimeConfig, TcpTransport
+from compiler import TcpTransport
 from compiler.quant_utils import quantize_multiplier_less_than_one
 from shared.reference import cpu_requantize
 from shared.sim_harness import run_gemm_on_sim
+from tests.mnist_model_binary import run_mnist_model_binary
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def _epilogue_params(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Layer-by-layer GEMM test (was tools/tvm_sim_test.py)
+# Layer-by-layer GEMM test
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_sim_gemm(sim_port):
@@ -102,17 +103,35 @@ def test_sim_gemm(sim_port):
     assert int(sim_out.argmax()) == int(cpu_out.argmax())
 
 
+def test_sim_model_binary_exec_model(sim_port):
+    """Full compiled model binary through firmware exec_model on Verilator sim."""
+    transport = TcpTransport(sim_port, timeout_s=1800)
+    try:
+        result = run_mnist_model_binary(
+            transport,
+            onnx_path=REPO_ROOT / "models/out/mnist_int8.onnx",
+            csr_json=REPO_ROOT / "build/sim/csr.json",
+        )
+    finally:
+        transport.close()
+
+    assert result.hidden_max_delta <= 2, (
+        f"model binary hidden max|delta|={result.hidden_max_delta}\n"
+        f"hidden actual[:16]={result.loom_hidden[:, :16].tolist()}\n"
+        f"hidden expected[:16]={result.cpu_hidden[:, :16].tolist()}"
+    )
+    assert result.output_max_delta <= 2, (
+        f"model binary max|delta|={result.output_max_delta}\n"
+        f"actual={result.loom_output.tolist()}\n"
+        f"expected={result.cpu_output.tolist()}"
+    )
+    assert result.loom_pred == result.cpu_pred
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-# Full ONNX→VM pipeline test (was tools/test_tvm_pipeline.py)
+# Full ONNX to model-binary pipeline test
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_sim_pipeline(sim_port):
-    """Full ONNX → Relax → VM pipeline on Verilator sim."""
-    from tests.mnist_pipeline import run_mnist_via_vm
-
-    runtime = LoomRuntime(TcpTransport(sim_port, timeout_s=1800), RuntimeConfig())
-    result = run_mnist_via_vm(runtime)
-
-    assert len(result.registered) == 2
-    assert result.max_delta < 0.1, f"max|Δ|={result.max_delta:.6f}"
-    assert result.loom_pred == result.cpu_pred
+    """Alias for the model-binary pipeline kept for the historical test name."""
+    test_sim_model_binary_exec_model(sim_port)

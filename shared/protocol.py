@@ -17,8 +17,10 @@ OP_PING = 0x00
 OP_READ = 0x10
 OP_WRITE = 0x11
 OP_EXEC = 0x12
+OP_EXEC_MODEL = 0x13
 
 STATUS_OK = 0x00
+WRITE_CHUNK_MAX = 1024
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,7 @@ class BaseTransport:
         raise NotImplementedError
 
     def write_mem(self, addr: int, data: bytes) -> None:
-        chunk_max = 0xFFFF - 4
+        chunk_max = min(WRITE_CHUNK_MAX, 0xFFFF - 4)
         for offset in range(0, len(data), chunk_max):
             chunk = data[offset : offset + chunk_max]
             self._request(OP_WRITE, struct.pack("<I", addr + offset) + chunk, expected_len=0)
@@ -114,6 +116,10 @@ class BaseTransport:
 
     def exec_program(self, program: bytes) -> int:
         data = self._request(OP_EXEC, program, expected_len=4)
+        return struct.unpack("<I", data)[0]
+
+    def exec_model(self, addr: int, length: int) -> int:
+        data = self._request(OP_EXEC_MODEL, struct.pack("<II", addr, length), expected_len=4)
         return struct.unpack("<I", data)[0]
 
     def ping(self) -> None:

@@ -50,7 +50,7 @@ hw-reset:
 libloom:
     zig build libaccel -Dbuild-dir=build/sipeed_tang_nano_20k
 
-# Train + export a quantized MNIST ONNX for TVM/hardware smoke tests (no-op if present).
+# Train + export a quantized MNIST ONNX for compiler/hardware smoke tests (no-op if present).
 mnist-model:
     @test -f models/out/mnist_int8.onnx || \
         uv run python -m models.mnist --epochs 10 --out-dir models/out
@@ -83,10 +83,26 @@ hw-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": libloom hw-firmwar
         --cfu-store-depth-words {{ cfu_store_depth }} \
         --verify-tolerance {{ verify-tolerance }}
 
-# Run MNIST TVM pipeline against real hardware (auto-builds the ONNX if needed).
-hw-mnist port=port: mnist-model libloom hw-firmware
+# Run compiled MNIST model binary against real hardware (auto-builds the ONNX if needed).
+hw-mnist port=port tolerance="2": mnist-model hw-firmware
     uv run python -m tests.test_hw_pipeline --port {{ port }} \
-        --lib zig-out/lib/libaccel.so
+        --csr-json build/sipeed_tang_nano_20k/csr.json \
+        --tolerance {{ tolerance }}
+
+# Run a precompiled MNIST .lmb artifact against real hardware via loom-run-model.
+hw-mnist-artifact port=port tolerance="2": mnist-model hw-firmware
+    uv run python -m tools.mnist_artifact \
+        --onnx models/out/mnist_int8.onnx \
+        --csr-json build/sipeed_tang_nano_20k/csr.json \
+        --model build/mnist.lmb \
+        --input build/mnist_input_i8.bin \
+        --expected build/mnist_expected_i8.bin
+    uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
+        --port {{ port }} \
+        --expect-output build/mnist_expected_i8.bin \
+        --tolerance {{ tolerance }} \
+        --check-prediction \
+        -o build/mnist_output_i8.bin
 
 # JTAG reset → firmware upload → small GEMM → large GEMM (one after another).
 hw-gemm-reset:
@@ -177,10 +193,26 @@ sim-gemm m="8" k="8" n="8" variant="all" verify-tolerance="1": sim-firmware
             --driver-timeout 1800 \
             --verify-tolerance {{ verify-tolerance }}
 
-# TVM path MNIST inference on Verilator simulation.
-sim-tvm: sim-firmware
-    uv run pytest tests/test_sim.py::test_sim_gemm -v --run-sim
+# Full compiled MNIST model binary on Verilator simulation.
+sim-mnist tolerance="2": mnist-model sim-firmware
+    uv run python -m tests.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
+        uv run python -m tests.test_hw_pipeline \
+            --port tcp://127.0.0.1:{{ sim_port }} \
+            --csr-json build/sim/csr.json \
+            --tolerance {{ tolerance }}
 
-# Full TVM pipeline (ONNX → Relax → patterns → codegen → sim execution).
-sim-tvm-pipeline: sim-firmware
-    uv run pytest tests/test_sim.py::test_sim_pipeline -v --run-sim
+# Full precompiled .lmb artifact through loom-run-model on Verilator simulation.
+sim-mnist-artifact tolerance="2": mnist-model sim-firmware
+    uv run python -m tools.mnist_artifact \
+        --onnx models/out/mnist_int8.onnx \
+        --csr-json build/sim/csr.json \
+        --model build/mnist.lmb \
+        --input build/mnist_input_i8.bin \
+        --expected build/mnist_expected_i8.bin
+    uv run python -m tests.sim_run --port {{ sim_port }} {{ _sim_args }} -- \
+        uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
+            --port tcp://127.0.0.1:{{ sim_port }} \
+            --expect-output build/mnist_expected_i8.bin \
+            --tolerance {{ tolerance }} \
+            --check-prediction \
+            -o build/mnist_output_i8.bin

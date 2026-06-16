@@ -10,6 +10,7 @@ pub const OpType = enum(u8) {
     read = 0x10,
     write = 0x11,
     exec = 0x12,
+    exec_model = 0x13,
     _,
 };
 
@@ -90,6 +91,13 @@ pub const WriteMem = struct {
 };
 
 pub const ReadMem = struct {
+    pub const Req = extern struct {
+        addr: u32,
+        len: u32,
+    };
+};
+
+pub const ExecModel = struct {
     pub const Req = extern struct {
         addr: u32,
         len: u32,

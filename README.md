@@ -2,42 +2,38 @@
 
 A full-stack int8 inference accelerator targeting the **Sipeed Tang Nano 20K** (Gowin GW2AR-18).
 Implements an output-stationary systolic array as a VexRiscv Custom Function Unit (CFU),
-with a custom IR, bare-metal firmware, host driver, and TVM compiler integration.
+with a model-binary runtime, bare-metal firmware, host driver, and xDSL compiler pipeline.
 
 ## Stack
 
-```
-TVM / Python host
-  ↓  ONNX → Relax IR → pattern match → codegen
-Host driver (Zig → libloom.so, C FFI)
-  ↓  UART serial protocol
-VexRiscv firmware (Zig, bare-metal RISC-V)
-  ↓  Kernel bytecode interpreter
-CFU hardware (Amaranth → Verilog → LiteX SoC)
-  DMA → double-buffered scratchpads → 8×8 systolic array → epilogue (int32→int8)
-```
+The active compiler path lowers supported quantized ONNX models into xDSL/TOSA-like IR,
+rewrites GEMM regions into loom dialect ops, lowers tiled affine schedules into
+RV32I/CUSTOM0 machine code, and packages constants, code, and a call schedule
+into a `.lmb` model binary. Firmware uploads constants, executes non-GEMM work
+on the VexRiscv CPU, and uses CUSTOM0 instructions to drive the CFU for tiled
+GEMM kernels.
 
 ## Key Design Points
 
 - **Output-stationary 8×8 systolic array** — int8 inputs, int32 accumulators, configurable dimensions
 - **Double-buffered scratchpads** — DMA fills one bank while the sequencer reads the other
 - **Hardware requantization epilogue** — per-channel bias/multiplier/shift, SRDHM + RDBPOT (TFLite-compatible)
-- **Custom bytecode IR (KIR)** — tile-oriented instructions: load-act, load-wgt, mma, store, set-epilogue, done
+- **Model-binary runtime** — `.lmb` artifacts carry constants, RV32I functions, CUSTOM0 GEMM kernels, and the execution schedule
 - **K-tiling with DMA/compute overlap** — pipelined execution for matrices larger than scratchpad depth
 - **Software M/N tiling** — handles matrices larger than the array dimensions
-- **TVM Relax integration** — pattern matching for quantized matmul composites, codegen to KIR, runtime bridge via `libloom.so`
+- **xDSL rewrite pipeline** — frontend ops, IRDL dialects, greedy rewrite passes, affine loop lowering, and direct RV32I encoding
 
 ## Directory Map
 
 | Directory   | Language        | Purpose                                                  |
 |-------------|-----------------|----------------------------------------------------------|
 | `hardware/` | Python/Amaranth | CFU RTL — systolic array, DMA scratchpads, sequencer, epilogue |
-| `firmware/` | Zig             | Bare-metal RISC-V firmware: UART protocol, KIR interpreter, DMA/CFU drivers |
+| `firmware/` | Zig             | Bare-metal RISC-V firmware: UART protocol, `.lmb` executor, KIR interpreter, DMA/CFU drivers |
 | `host/`     | Zig             | Host-side native driver + C API (`libloom.so`)          |
 | `shared/`   | Zig + Python    | Wire protocol, IR definitions (shared across firmware, host, and tools) |
-| `compiler/` | Python          | TVM Relax patterns, codegen, quantization utils, runtime bridge |
+| `compiler/` | Python          | xDSL frontend/dialects/rewrites, affine lowering, RV32I + CUSTOM0 backend, model runtime |
 | `models/`   | Python          | Int8 MNIST training + static quantization (ONNX export)  |
-| `tests/`    | Python          | E2E GEMM test harness, Verilator sim tests, TVM pipeline tests |
+| `tests/`    | Python          | E2E GEMM test harness, Verilator sim tests, model-binary pipeline tests |
 | `tools/`    | Python          | LiteX flash utils, IR debug helpers                      |
 | `docs/`     | Markdown        | Architecture Decision Records                            |
 | `top.v`     | Verilog (gen.)  | Generated CFU Verilog — never edit directly              |
@@ -105,19 +101,42 @@ just hw-gemm
 just hw-gemm-reset
 ```
 
-## TVM Integration
+## xDSL Model-Binary Compiler
 
-The `compiler/` package implements an out-of-tree backend for Apache TVM's Relax IR:
+The `compiler/` package lowers supported quantized ONNX GEMM regions through xDSL/TOSA
+and affine schedules into a loom model binary:
 
-1. **Pattern matching** (`compiler/patterns.py`) — identifies quantized matmul composites (QDQ format) in imported ONNX models
-2. **Codegen** (`compiler/codegen.py`) — lowers matched regions to `call_dps_packed` with extracted weights and quantization constants
-3. **Runtime** (`compiler/runtime.py`) — bridges TVM packed functions to `libloom.so`, handles memory layout, builds KIR programs, executes on hardware
-4. **Quantization utils** (`compiler/quant_utils.py`) — derives per-channel epilogue parameters (bias, multiplier, shift) from ONNX scale/zero-point constants
+1. **Frontend** (`compiler/frontend/`) — imports supported ONNX quantized GEMM/linear patterns into xDSL TOSA-like ops.
+2. **Dialects** (`compiler/dialects/`) — defines loom IR with `@irdl_op_definition` ops for GEMM, repack, DMA tile loads, tiled MMA, epilogue config, and stores.
+3. **Backend** (`compiler/backend/model.py`) — plans tensor memory, constants, affine tiling, K-reduction, runtime schedule, and model-binary sections.
+4. **Target lowering** (`compiler/backend/riscv_ir.py`, `compiler/backend/riscv_ir_encode.py`) — lowers affine loop schedules through xDSL RISC-V target IR into compact RV32I + CUSTOM0 code with async DMA setup/waits, tiled K reduction, epilogue writes, and result stores.
+5. **Runtime** (`compiler/backend/runtime.py`) — uploads raw quantized int8 input plus the model binary and calls firmware `exec_model`; input/inter-layer packing runs as RV32I code in the model schedule.
 
 ```sh
 # Train MNIST + export statically-quantized int8 ONNX
 uv run python -m models.mnist
 
-# Build the host shared library
-just libloom
+# Compile a model binary
+uv run loom-compile-model models/out/mnist_int8.onnx -o build/mnist.lmb \
+  --csr-json build/sipeed_tang_nano_20k/csr.json --manifest
+# The printed manifest includes deployment.model_addr for exec-model-bin.
+# Add --debug-sections when you want embedded ASM/xDSL IR traces in the .lmb;
+# the default artifact contains only manifest, constants, RISC-V code, and schedule.
+
+# Execute a precompiled binary over serial or sim TCP with raw int8 input bytes
+uv run loom-run-model build/mnist.lmb build/input_i8.bin --port /dev/ttyUSB1 \
+  -o build/output_i8.bin --expect-output build/expected_i8.bin \
+  --tolerance 2 --check-prediction
+
+# Run the compiled model binary on Verilator sim and print/check logits
+just sim-mnist
+
+# Run the standalone .lmb artifact path through the loom-run-model CLI on sim
+just sim-mnist-artifact
+
+# Run the model binary on hardware after bitstream + firmware upload
+just hw-mnist
+
+# Run the standalone .lmb artifact path through the loom-run-model CLI on hardware
+just hw-mnist-artifact
 ```

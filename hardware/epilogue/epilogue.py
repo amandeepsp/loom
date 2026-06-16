@@ -45,7 +45,7 @@ class Epilogue(Component):
             # Per-channel params
             "bias": In(signed(32)),
             "multiplier": In(signed(32)),
-            "shift": In(unsigned(5)),
+            "shift": In(unsigned(6)),
             # Per-layer params (constant across tile)
             "output_offset": In(signed(16)),
             "activation_min": In(signed(out_width)),
@@ -85,7 +85,7 @@ class Epilogue(Component):
         ]
 
         # Delay shift by 1 cycle to align with SRDHM output
-        reg_shift = Signal(unsigned(5))
+        reg_shift = Signal(unsigned(6))
         m.d.sync += reg_shift.eq(self.shift)
 
         # Stage 1 (combinational from registered SRDHM output): RDBPOT
@@ -141,7 +141,7 @@ PerChannelParamLayout = StructLayout(
     {
         "bias": signed(32),
         "multiplier": signed(32),
-        "shift": unsigned(5),
+        "shift": unsigned(6),
     }
 )
 
@@ -171,7 +171,7 @@ class PerChannelStore(Component):
             "rd_addr": In(range(depth)),
             "bias": Out(signed(32)),
             "multiplier": Out(signed(32)),
-            "shift": Out(unsigned(5)),
+            "shift": Out(unsigned(6)),
         }
         super().__init__(ports)
 
@@ -180,7 +180,7 @@ class PerChannelStore(Component):
 
         bias_mem = Memory(shape=signed(32), depth=self.depth, init=[])
         mult_mem = Memory(shape=signed(32), depth=self.depth, init=[])
-        shift_mem = Memory(shape=unsigned(5), depth=self.depth, init=[])
+        shift_mem = Memory(shape=unsigned(6), depth=self.depth, init=[])
         m.submodules.bias_mem = bias_mem
         m.submodules.mult_mem = mult_mem
         m.submodules.shift_mem = shift_mem

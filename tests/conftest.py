@@ -26,9 +26,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_DIR = REPO_ROOT / "build" / "sim"
 VTOP = BUILD_DIR / "Vtop"
 FW_BIN = REPO_ROOT / "zig-out" / "bin" / "firmware.bin"
-SIM_PORT = 21452
-
-
 def pytest_addoption(parser):
     parser.addoption(
         "--run-sim", action="store_true", default=False,
@@ -134,6 +131,7 @@ def sim_port(request: pytest.FixtureRequest) -> str:
     if not request.config.getoption("--run-sim", default=False):
         pytest.skip("needs --run-sim (and pre-built sim — run `just sim-firmware` first)")
 
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
     sim_log = open(BUILD_DIR / "sim_stderr.log", "wb")
 
     sim_cmd = [
@@ -164,8 +162,9 @@ def sim_port(request: pytest.FixtureRequest) -> str:
         # unblocks accept().
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", SIM_PORT))
+        listener.bind(("127.0.0.1", 0))
         listener.listen(1)
+        sim_port = listener.getsockname()[1]
 
         stop = threading.Event()
         conn_ref: list[socket.socket | None] = [None]
@@ -179,7 +178,7 @@ def sim_port(request: pytest.FixtureRequest) -> str:
         accept_thread = threading.Thread(target=_accept_and_bridge, daemon=True)
         accept_thread.start()
 
-        yield f"tcp://127.0.0.1:{SIM_PORT}"
+        yield f"tcp://127.0.0.1:{sim_port}"
 
     except Exception:
         _kill_sim(sim)

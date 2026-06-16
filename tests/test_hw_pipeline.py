@@ -1,70 +1,66 @@
 #!/usr/bin/env python
-"""Run the MNIST TVM pipeline against a physical loom board.
-
-Mirrors ``tests/test_sim.py::test_sim_pipeline`` but dispatches through a
-``SerialTransport`` instead of TCP. Both share
-``tests/mnist_pipeline.run_mnist_via_vm`` so the lowering + VM dispatch path
-is identical.
-"""
+"""Run the compiled MNIST model binary against hardware or Verilator sim."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from compiler import LoomRuntime, RuntimeConfig, SerialTransport
+from compiler import SerialTransport, TcpTransport
 
-from tests.mnist_pipeline import DEFAULT_ONNX, run_mnist_via_vm
+from tests.mnist_model_binary import DEFAULT_ONNX, run_mnist_model_binary
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run ONNX -> Relax -> loom runtime MNIST inference on hardware.",
+        description="Compile ONNX to a loom model binary and run it on hardware or sim.",
     )
     parser.add_argument("--port", default="/dev/ttyUSB1")
     parser.add_argument("--baud-rate", type=int, default=115200)
     parser.add_argument("--onnx", default=str(DEFAULT_ONNX))
-    parser.add_argument("--lib", default=str(REPO_ROOT / "zig-out/lib/libaccel.so"))
+    parser.add_argument("--csr-json", default=str(REPO_ROOT / "build/sipeed_tang_nano_20k/csr.json"))
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--tolerance", type=float, default=0.1)
+    parser.add_argument("--tolerance", type=int, default=2)
+    parser.add_argument("--model-addr", type=lambda text: int(text, 0), default=None)
     args = parser.parse_args()
 
-    transport = SerialTransport(
-        port=args.port,
-        baud_rate=args.baud_rate,
-        lib_path=args.lib,
-    )
-    runtime = LoomRuntime(
-        transport,
-        RuntimeConfig(
+    if args.port.startswith("tcp://"):
+        transport = TcpTransport(args.port, timeout_s=1800)
+        target_label = "sim"
+    else:
+        transport = SerialTransport(
             port=args.port,
             baud_rate=args.baud_rate,
-            lib_path=args.lib,
-        ),
-    )
-
+            timeout_s=1800,
+        )
+        target_label = "hw"
     try:
-        result = run_mnist_via_vm(
-            runtime,
+        result = run_mnist_model_binary(
+            transport,
             onnx_path=Path(args.onnx),
+            csr_json=Path(args.csr_json),
             seed=args.seed,
+            model_addr=args.model_addr,
         )
     finally:
-        runtime.close()
+        transport.close()
 
-    print(f"lowered externs: {len(result.registered)}")
-    for symbol in result.registered:
-        print(f"  {symbol}")
-    print(f"cpu output: {result.cpu_out.flatten().tolist()}")
-    print(f"hw output:  {result.loom_out.flatten().tolist()}")
-    print(f"max delta: {result.max_delta:.6f}")
-    print(f"prediction: cpu={result.cpu_pred} hw={result.loom_pred}")
+    print(f"model: addr=0x{result.model_addr:x} bytes={result.model_len} cycles={result.cycles}")
+    print(f"cpu output: {result.cpu_output.flatten().tolist()}")
+    print(f"{target_label} output:  {result.loom_output.flatten().tolist()}")
+    print(f"hidden max delta: {result.hidden_max_delta}")
+    print(f"output max delta: {result.output_max_delta}")
+    print(f"prediction: cpu={result.cpu_pred} {target_label}={result.loom_pred}")
 
-    if result.max_delta >= args.tolerance:
+    if result.hidden_max_delta > args.tolerance:
         raise AssertionError(
-            f"max delta {result.max_delta:.6f} >= tolerance {args.tolerance}"
+            f"hidden max delta {result.hidden_max_delta} > tolerance {args.tolerance}"
+        )
+    if result.output_max_delta > args.tolerance:
+        raise AssertionError(
+            f"output max delta {result.output_max_delta} > tolerance {args.tolerance}"
         )
     if result.loom_pred != result.cpu_pred:
         raise AssertionError(

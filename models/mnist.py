@@ -122,7 +122,7 @@ def export_onnx_static_quant(model, out_dir: Path, data_dir: str) -> Path:
         str(prep_path),
         str(int8_path),
         calibration_data_reader=calibration_reader,
-        quant_format=QuantFormat.QDQ,
+        quant_format=QuantFormat.QOperator,
         op_types_to_quantize=["Gemm", "Relu"],
     )
     prep_path.unlink()

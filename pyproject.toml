@@ -28,14 +28,16 @@ dependencies = [
     "onnx>=1.21.0",
     "onnxruntime>=1.23.2",
     "onnxscript>=0.1.0",
-    "tvm",
+    "xdsl",
+    "onnx-ir>=0.2.0",
 ]
 
 [project.scripts]
 litex-upload-once = "tools.litex_upload_once:main"
-
+loom-compile-model = "compiler.backend.__main__:main"
+loom-run-model = "compiler.backend.run_model:main"
 [tool.setuptools.packages.find]
-include = ["tools*"]
+include = ["tools*", "compiler*", "shared*"]
 namespaces = true
 
 [tool.pytest.ini_options]
@@ -47,7 +49,6 @@ addopts = ["--ignore=hardware/experiments"]
 root = "hardware"
 
 [tool.uv.sources]
-tvm = { path = "../tvm", editable = true }
 litex = { path = "../litex/litex", editable = true }
 litex-boards = { path = "../litex/litex-boards", editable = true }
 litedram = { path = "../litex/litedram", editable = true }

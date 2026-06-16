@@ -52,27 +52,8 @@ pub const LoomStatus = enum(c_int) {
     }
 };
 
-inline fn require(comptime T: type, opt: ?T) union(enum) { ok: T, err: c_int } {
-    if (opt) |v| return .{ .ok = v };
-    return .{ .err = @intFromEnum(LoomStatus.invalid_argument) };
-}
-
 inline fn mapError(err: anyerror) c_int {
     return @intFromEnum(LoomStatus.fromError(err));
-}
-
-inline fn unwrapHandle(handle: ?*LoomHandle) *LoomHandle {
-    return switch (require(*LoomHandle, handle)) {
-        .ok => |v| v,
-        .err => |e| return e,
-    };
-}
-
-inline fn unwrapPtr(comptime T: type, opt: ?T) T {
-    return switch (require(T, opt)) {
-        .ok => |v| v,
-        .err => |e| return e,
-    };
 }
 
 pub const LoomHandle = struct {
@@ -84,8 +65,8 @@ pub export fn loom_open(
     baud_rate: u32,
     out_handle: ?*?*LoomHandle,
 ) c_int {
-    const path = unwrapPtr([*:0]const u8, port_path);
-    const handle_ptr = unwrapPtr(*?*LoomHandle, out_handle);
+    const path = port_path orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const handle_ptr = out_handle orelse return @intFromEnum(LoomStatus.invalid_argument);
 
     const handle = std.heap.page_allocator.create(LoomHandle) catch {
         handle_ptr.* = null;
@@ -110,7 +91,7 @@ pub export fn loom_close(handle: ?*LoomHandle) void {
 }
 
 pub export fn loom_ping(handle: ?*LoomHandle) c_int {
-    const h = unwrapHandle(handle);
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
     h.driver.ping() catch |err| return mapError(err);
     return @intFromEnum(LoomStatus.ok);
 }
@@ -126,8 +107,8 @@ pub export fn loom_write_mem(
     data: ?[*]const u8,
     len: usize,
 ) c_int {
-    const h = unwrapHandle(handle);
-    const ptr = unwrapPtr([*]const u8, data);
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const ptr = data orelse return @intFromEnum(LoomStatus.invalid_argument);
     h.driver.writeMem(addr, ptr[0..len]) catch |err| return mapError(err);
     return @intFromEnum(LoomStatus.ok);
 }
@@ -138,8 +119,8 @@ pub export fn loom_read_mem(
     buf: ?[*]u8,
     len: usize,
 ) c_int {
-    const h = unwrapHandle(handle);
-    const ptr = unwrapPtr([*]u8, buf);
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const ptr = buf orelse return @intFromEnum(LoomStatus.invalid_argument);
     h.driver.readMem(addr, ptr[0..len]) catch |err| return mapError(err);
     return @intFromEnum(LoomStatus.ok);
 }
@@ -150,11 +131,43 @@ pub export fn loom_exec(
     program_len: usize,
     out_cycles: ?*u32,
 ) c_int {
-    const h = unwrapHandle(handle);
-    const ptr = unwrapPtr([*]const u8, program);
-    const cycles_ptr = unwrapPtr(*u32, out_cycles);
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const ptr = program orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const cycles_ptr = out_cycles orelse return @intFromEnum(LoomStatus.invalid_argument);
 
     cycles_ptr.* = h.driver.exec(ptr[0..program_len]) catch |err| return mapError(err);
+    return @intFromEnum(LoomStatus.ok);
+}
+
+pub export fn loom_exec_model(
+    handle: ?*LoomHandle,
+    model_addr: u32,
+    model_len: u32,
+    out_cycles: ?*u32,
+) c_int {
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const cycles_ptr = out_cycles orelse return @intFromEnum(LoomStatus.invalid_argument);
+
+    cycles_ptr.* = h.driver.execModel(model_addr, model_len) catch |err| return mapError(err);
+    return @intFromEnum(LoomStatus.ok);
+}
+
+pub export fn loom_exec_model_bytes(
+    handle: ?*LoomHandle,
+    model_addr: u32,
+    model: ?[*]const u8,
+    model_len: usize,
+    out_cycles: ?*u32,
+) c_int {
+    const h = handle orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const ptr = model orelse return @intFromEnum(LoomStatus.invalid_argument);
+    const cycles_ptr = out_cycles orelse return @intFromEnum(LoomStatus.invalid_argument);
+    if (model_len > std.math.maxInt(u32)) {
+        return @intFromEnum(LoomStatus.payload_too_large);
+    }
+
+    h.driver.writeMem(model_addr, ptr[0..model_len]) catch |err| return mapError(err);
+    cycles_ptr.* = h.driver.execModel(model_addr, @intCast(model_len)) catch |err| return mapError(err);
     return @intFromEnum(LoomStatus.ok);
 }
 
@@ -162,9 +175,17 @@ pub export fn loom_status_string(code: c_int) [*:0]const u8 {
     const status: LoomStatus = switch (code) {
         @intFromEnum(LoomStatus.ok) => .ok,
         @intFromEnum(LoomStatus.invalid_argument) => .invalid_argument,
-        @intFromEnum(LoomStatus.io_error) => .io_error,
-        @intFromEnum(LoomStatus.protocol_error) => .protocol_error,
+        @intFromEnum(LoomStatus.payload_too_large) => .payload_too_large,
+        @intFromEnum(LoomStatus.bad_response) => .bad_response,
+        @intFromEnum(LoomStatus.bad_magic) => .bad_magic,
+        @intFromEnum(LoomStatus.unknown_op) => .unknown_op,
+        @intFromEnum(LoomStatus.bad_payload_len) => .bad_payload_len,
+        @intFromEnum(LoomStatus.bad_address) => .bad_address,
+        @intFromEnum(LoomStatus.illegal_instruction) => .illegal_instruction,
+        @intFromEnum(LoomStatus.trap_fault) => .trap_fault,
         @intFromEnum(LoomStatus.device_error) => .device_error,
+        @intFromEnum(LoomStatus.out_of_memory) => .out_of_memory,
+        @intFromEnum(LoomStatus.io_error) => .io_error,
         else => return "unknown status",
     };
     return status.describe();

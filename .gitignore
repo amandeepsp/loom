@@ -4,7 +4,10 @@ top.v
 *.vcd
 .zig-cache/
 zig-out/
+zig-pkg/
 firmware/crt0.o
+/linalg.mlir
+/tosa.mlir
 
 # Python
 __pycache__/

@@ -86,10 +86,11 @@ pub fn build(b: *std.Build) void {
         .root_module = drv_c_api_mod,
     });
 
-    _ = b.addInstallArtifact(drv_c_api_lib, .{});
+    const install_c_api_lib = b.addInstallArtifact(drv_c_api_lib, .{});
+    b.getInstallStep().dependOn(&install_c_api_lib.step);
 
     const libloom_step = b.step("host-lib", "Build libloom.so");
-    libloom_step.dependOn(&drv_c_api_lib.step);
+    libloom_step.dependOn(&install_c_api_lib.step);
 
     const run_drv = b.addRunArtifact(drv_exe);
     run_drv.step.dependOn(b.getInstallStep());
@@ -101,8 +102,18 @@ pub fn build(b: *std.Build) void {
     const drv_tests = b.addTest(.{ .root_module = driver_mod });
     const run_drv_tests = b.addRunArtifact(drv_tests);
 
-    const test_step = b.step("test", "Run driver tests");
+    const model_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("firmware/model.zig"),
+            .target = drv_target,
+            .optimize = drv_optimize,
+        }),
+    });
+    const run_model_tests = b.addRunArtifact(model_tests);
+
+    const test_step = b.step("test", "Run host driver and firmware model tests");
     test_step.dependOn(&run_drv_tests.step);
+    test_step.dependOn(&run_model_tests.step);
 
     // Device firmware
     const fw_query: std.Target.Query = .{

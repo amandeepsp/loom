@@ -1,33 +1,39 @@
-"""Loom compiler: TVM Relax integration for the CFU accelerator.
+"""Public compiler entry points for the xDSL model-binary pipeline."""
 
-This package contains the out-of-tree TVM lowering pipeline:
-- patterns: DPL pattern matching for quantized matmul composites
-- codegen: Lowering loom regions to runtime calls
-- relax: Pass entrypoints (tiling, partitioning, lowering)
-- runtime: Host runtime bridge (packed funcs, memory upload, execution)
-- quant_utils: Epilogue multiplier/shift derivation
-"""
+from shared.protocol import SerialTransport, TcpTransport
 
-from .codegen import lower_loom_regions, get_composite_constants
-from .patterns import partition_for_loom_cfu, make_matmul_requant_pattern
-from .relax import lower_pipeline
-from .runtime import (
-    LoomRuntime,
-    RuntimeConfig,
-    SerialTransport,
-    TcpTransport,
-    register_runtime_functions,
+from .backend import (
+    CompiledModel,
+    ModelBinaryArtifact,
+    ModelBinaryRuntime,
+    ModelRunResult,
+    ModelRuntime,
+    compile_onnx_model,
+    compile_tosa_module,
+    lower_tosa_to_affine,
+    lower_tosa_to_loom,
+    lower_tosa_to_riscv,
+    model_binary_manifest,
+    model_binary_sections,
 )
+from .frontend import emit_tosa_ir, load_model
+
 
 __all__ = [
-    "lower_loom_regions",
-    "get_composite_constants",
-    "partition_for_loom_cfu",
-    "make_matmul_requant_pattern",
-    "lower_pipeline",
-    "LoomRuntime",
-    "RuntimeConfig",
+    "CompiledModel",
+    "ModelBinaryArtifact",
+    "ModelBinaryRuntime",
+    "ModelRunResult",
+    "ModelRuntime",
     "SerialTransport",
     "TcpTransport",
-    "register_runtime_functions",
+    "compile_onnx_model",
+    "compile_tosa_module",
+    "emit_tosa_ir",
+    "load_model",
+    "lower_tosa_to_affine",
+    "lower_tosa_to_loom",
+    "lower_tosa_to_riscv",
+    "model_binary_manifest",
+    "model_binary_sections",
 ]

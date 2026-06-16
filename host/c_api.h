@@ -35,6 +35,13 @@ const char *loom_status_string(loom_status_t code);
 loom_status_t loom_write_mem(LoomHandle *handle, uint32_t addr, const uint8_t *data, size_t len);
 loom_status_t loom_read_mem(LoomHandle *handle, uint32_t addr, uint8_t *buf, size_t len);
 loom_status_t loom_exec(LoomHandle *handle, const uint8_t *program, size_t program_len, uint32_t *out_cycles);
+loom_status_t loom_exec_model(LoomHandle *handle, uint32_t model_addr, uint32_t model_len, uint32_t *out_cycles);
+loom_status_t loom_exec_model_bytes(
+    LoomHandle *handle,
+    uint32_t model_addr,
+    const uint8_t *model,
+    size_t model_len,
+    uint32_t *out_cycles);
 
 #ifdef __cplusplus
 }

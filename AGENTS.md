@@ -3,15 +3,15 @@
 ## Project Overview
 
 **loom** — RISC-V Custom Function Unit (CFU) accelerator for ML on FPGA (Tang Nano 20K).
-Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python (SoC integration).
+Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python/xDSL (compiler + SoC integration).
 
 ### Directory Map
 
 - `hardware/` — Amaranth Python RTL: CFU datapath, systolic array, DMA scratchpads, sequencer, epilogue
-- `firmware/` — Zig: bare-metal RISC-V (VexRISCV), UART protocol, KIR interpreter, CFU/DMA drivers
+- `firmware/` — Zig: bare-metal RISC-V (VexRiscv), UART protocol, `.lmb` model executor, KIR interpreter, CFU/DMA drivers
 - `shared/` — Zig + Python: wire protocol (`protocol.zig`), IR definitions (`ir.zig`, `ir.py`)
 - `host/` — Zig: native driver + C API (`libloom.so`) for serial communication with board
-- `compiler/` — Python: TVM Relax patterns, codegen, quantization utils, runtime bridge
+- `compiler/` — Python: ONNX importer, xDSL/IRDL dialects, rewrite passes, affine lowering, RV32I + CUSTOM0 backend
 - `models/` — Python: int8 MNIST training, static quantization, ONNX export
 - `tests/` — Python: E2E GEMM test harness (`test_gemm.py`), Verilator sim tests (`test_sim.py`)
 - `tools/` — Python: LiteX flash utils, IR debug helpers
@@ -72,12 +72,41 @@ uv run pytest hardware/systolic/test_*.py -v
 just sim-gemm                      # 8×8×8 default
 just sim-gemm m=4 k=16 n=4         # custom sizes
 
-# Sim TVM path (MNIST model on Verilator)
-just sim-tvm
+# Sim full MNIST model-binary path (Verilator + firmware)
+just sim-mnist
+just sim-mnist-artifact
 ```
 
 Tests live in: `hardware/systolic/`, `hardware/memory/`, `hardware/epilogue/`, and `tests/`.
 pytest configured in `pyproject.toml` to include these paths.
+
+### Compiler / Model Binary
+
+```sh
+# Train/export the quantized MNIST ONNX if missing
+just mnist-model
+
+# Compile ONNX to a deploy .lmb for the current hardware CSR map
+uv run loom-compile-model models/out/mnist_int8.onnx \
+  -o build/mnist.lmb \
+  --csr-json build/sipeed_tang_nano_20k/csr.json \
+  --manifest
+
+# Emit deterministic raw int8 input/expected files plus .lmb
+uv run python -m tools.mnist_artifact \
+  --onnx models/out/mnist_int8.onnx \
+  --csr-json build/sipeed_tang_nano_20k/csr.json \
+  --model build/mnist.lmb \
+  --input build/mnist_input_i8.bin \
+  --expected build/mnist_expected_i8.bin
+
+# Run a precompiled .lmb on board or sim
+uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
+  --port /dev/ttyUSB1 \
+  --expect-output build/mnist_expected_i8.bin \
+  --tolerance 2 \
+  --check-prediction
+```
 
 ## Build Order (Critical)
 
@@ -115,33 +144,33 @@ When tuning hardware, update Justfile variables — they propagate to both Veril
 - `host/c_api.zig`: C FFI surface (`libloom.so`) — `loom_open`, `loom_exec`, `loom_write_mem`, etc.
 - `firmware/interpreter.zig`: Firmware IR interpreter (executes instructions, drives DMA, sequencer).
 - `tools/ir.py`: ~~Legacy IR bytecode builder~~ (deleted; functionality merged into `shared/ir.py`).
-- `tests/test_sim.py`: pytest-based Verilator sim tests (layer-by-layer GEMM, full ONNX→VM pipeline).
+- `firmware/model.zig`: `.lmb` model-binary parser/executor (loads constants, calls generated RV32I functions).
+- `tests/test_sim.py`: pytest-based Verilator sim tests (layer-by-layer GEMM, full ONNX→model-binary pipeline).
 
 Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, `firmware/interpreter.zig`, `host/driver.zig`.
 
-## TVM Integration
+Changing the `.lmb` model binary requires sync across `compiler/backend/model.py`, `compiler/backend/runtime.py`, `firmware/model.zig`, and host/transport tests.
 
-- `compiler/patterns.py`: Relax DPL patterns for quantized matmul composites (QDQ format from ONNX).
-- `compiler/codegen.py`: Lowers partitioned regions to `call_dps_packed`, extracts composite constants.
-- `compiler/runtime.py`: `LoomRuntime` class — bridges TVM packed functions to `libloom.so`, memory layout, KIR generation.
+## xDSL Compiler Pipeline
+
+- `compiler/frontend/`: imports supported quantized ONNX ops into xDSL TOSA-like IR.
+- `compiler/dialects/loom.py`: IRDL ops for GEMM candidates, planned GEMM, tiling, DMA loads, MMA, epilogue, and stores.
+- `compiler/dialects/loom_cpu.py`: CPU-side model-binary ops such as activation packing.
+- `compiler/dialects/loom_riscv.py`: target CUSTOM0/control ops before final RV32 encoding.
+- `compiler/backend/rewrites.py`: xDSL `RewritePattern` and `ModulePass` lowering stages.
+- `compiler/backend/model.py`: memory planning, constants, schedule packing, `.lmb` sections.
+- `compiler/backend/riscv_ir.py`: affine GEMM tile schedules to structured xDSL RISC-V/SCF plus CUSTOM0 ops.
+- `compiler/backend/riscv_ir_encode.py`: direct RV32I + CUSTOM0 machine-code encoder.
+- `compiler/backend/cpu.py`: non-GEMM CPU functions emitted as RV32I; use LLVM/MLIR tooling where practical.
 - `compiler/quant_utils.py`: Derives per-channel epilogue params (bias, multiplier, shift) from scale/zero-point.
-- `compiler/relax.py`: `lower_pipeline()` — tiling → partitioning → codegen → lambda lift.
 
-The TVM integration is out-of-tree; it imports from `../tvm` (local Apache TVM build).
+The VexRiscv target has no hardware floating point. Generated firmware/model code must stay integer-only, and generated CPU helper code must stay RV32I unless the SoC/firmware contract is explicitly changed.
 
 ## Hardware Quirks
 
 ### Datapath Flow
 
-```
-Serial Input → UART Rx (firmware) → IR Interpreter
-  ↓
-DMA (fill) → Scratchpad (double-buffered) → Sequencer reads compute bank
-  ↓
-Systolic Array (output-stationary GEMM) → psum pipeline
-  ↓
-Epilogue (int32→int8 requantization) → Results readback
-```
+Firmware receives commands over UART. KIR bytecode is interpreted directly; `.lmb` model binaries load constants, run generated RV32I functions on the VexRiscv CPU, and issue CUSTOM0 instructions for GEMM. The CFU uses DMA readers to fill double-buffered scratchpads, the sequencer drives the output-stationary systolic array, and the epilogue requantizes int32 accumulators to int8 results.
 
 ### Code Generation
 
@@ -229,10 +258,15 @@ Python `tile_store(m_offset, n_offset)` emits in the same order as Zig `TileStor
 
 ### LED Status Indicators
 
-Board RGB LED shows firmware state:
-- **Blue (slow pulse)** → IDLE, waiting for commands
-- **Green** → Compute in progress
-- **Red** → Error state
+With `--with-cfu-led-debug`, board LEDs are driven by CFU hardware debug, not firmware prints:
+- RGB blue means idle.
+- RGB yellow/green-yellow means DMA active.
+- RGB green means sequencer/compute active.
+- RGB cyan means epilogue active.
+- RGB white means done/response pending.
+- RGB red means error.
+
+The six debug LEDs are active-low on the pins but the wrapper inverts them for display. Logical `debug_word = {phase_code[2:0], cfu_instr_debug[2:0]}`. Depending on physical viewing direction, the visible six-bit string may need reversing. The low three bits latch the last CFU instruction, so an idle end state can still show `...100` after `READ_RESULT`; idle is indicated by RGB blue and phase `000`.
 
 ### Simulation Tests
 

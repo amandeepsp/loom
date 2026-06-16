@@ -64,7 +64,7 @@ class RoundingDividebyPOT(Elaboratable):
 
     def __init__(self):
         self.x = Signal(signed(32))
-        self.exponent = Signal(5)
+        self.exponent = Signal(6)
         self.result = Signal(signed(32))
 
     def elaborate(self, platform):

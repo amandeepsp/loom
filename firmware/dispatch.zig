@@ -3,6 +3,9 @@ const config = @import("config");
 const interpreter = @import("interpreter.zig");
 const link = @import("link.zig");
 const memory = @import("memory.zig");
+const model = @import("model.zig");
+const protocol = @import("protocol");
+const uart = @import("uart.zig");
 
 pub fn dispatch(header: link.Header) void {
     switch (header.op) {
@@ -10,6 +13,7 @@ pub fn dispatch(header: link.Header) void {
         .read => memory.readMem(header),
         .write => memory.writeMem(header),
         .exec => exec(header),
+        .exec_model => execModel(header),
         else => link.sendError(header.seq_id, .unknown_op, &.{}),
     }
 }
@@ -39,6 +43,21 @@ fn exec(header: link.Header) void {
     link.sendResponse(header.seq_id, .ok, std.mem.asBytes(&cycles), @truncate(cycles));
 }
 
+fn execModel(header: link.Header) void {
+    if (header.payload_len != @sizeOf(protocol.ExecModel.Req)) {
+        link.drainPayload(header.payload_len);
+        link.sendError(header.seq_id, .bad_payload_len, &.{});
+        return;
+    }
+
+    var req: protocol.ExecModel.Req = undefined;
+    uart.readBytes(std.mem.asBytes(&req));
+    const cycles = model.execute(req.addr, req.len) catch |err| {
+        return sendModelError(header.seq_id, err);
+    };
+    link.sendResponse(header.seq_id, .ok, std.mem.asBytes(&cycles), @truncate(cycles));
+}
+
 fn sendExecError(seq_id: u16, err: interpreter.ExecError, debug_buf: []const u8) void {
     const code: link.StatusCode = switch (err) {
         error.BadMagic => .bad_magic,
@@ -46,4 +65,13 @@ fn sendExecError(seq_id: u16, err: interpreter.ExecError, debug_buf: []const u8)
         error.BadAddress => .bad_address,
     };
     link.sendError(seq_id, code, debug_buf);
+}
+
+fn sendModelError(seq_id: u16, err: model.ExecError) void {
+    const code: link.StatusCode = switch (err) {
+        error.BadMagic => .bad_magic,
+        error.BadPayloadLen => .bad_payload_len,
+        error.BadAddress => .bad_address,
+    };
+    link.sendError(seq_id, code, &model.debug_buf);
 }

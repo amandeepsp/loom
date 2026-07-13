@@ -131,9 +131,8 @@ class ModelBinaryRuntime:
         cycles = self.transport.exec_model(self.model_addr, len(self.model_blob))
         output_bytes = self.transport.read_mem(output_buf.addr, output_buf.size)
         output = np.frombuffer(output_bytes, dtype=np.int8).reshape(padded_shape)
-        rows, cols = output_shape
         return ModelRunResult(
-            output=output[:rows, :cols].copy(),
+            output=output[tuple(slice(0, dim) for dim in output_shape)].copy(),
             cycles=cycles,
             model_addr=self.model_addr,
         )
@@ -199,19 +198,22 @@ class ModelRuntime:
     def run_quantized(self, input_matrix: np.ndarray) -> ModelRunResult:
         """Run the model with an already-quantized int8 input matrix."""
 
-        first = self.compiled.kernels[0]
-        final = self.compiled.kernels[-1]
+        contract = _dict_field(self.compiled.manifest(), "runtime_contract")
+        input_contract = _dict_field(contract, "input")
+        output_contract = _dict_field(contract, "output")
+        input_shape = _shape_field(input_contract, "shape")
+        output_shape = _shape_field(output_contract, "shape")
+        padded_shape = _shape_field(output_contract, "padded_shape")
         input_arr = np.asarray(input_matrix)
         if input_arr.dtype != np.int8:
             raise TypeError("input_matrix must be dtype int8")
-        if input_arr.shape != (first.m, first.k):
+        if input_arr.shape != input_shape:
             raise ValueError(
-                f"input shape {input_arr.shape} does not match "
-                f"compiled model shape {(first.m, first.k)}"
+                f"input shape {input_arr.shape} does not match compiled model shape {input_shape}"
             )
 
-        input_buf = self._buffer(first.input_buffer)
-        output_buf = self._buffer(final.output_buffer)
+        input_buf = self._buffer(str(input_contract["buffer"]))
+        output_buf = self._buffer(str(output_contract["buffer"]))
 
         input_bytes = np.ascontiguousarray(input_arr).tobytes()
         if len(input_bytes) != input_buf.size:
@@ -225,9 +227,9 @@ class ModelRuntime:
         cycles = self.transport.exec_model(self.model_addr, len(self.model_blob))
 
         output_bytes = self.transport.read_mem(output_buf.addr, output_buf.size)
-        output = np.frombuffer(output_bytes, dtype=np.int8).reshape(final.padded_m, final.n)
+        output = np.frombuffer(output_bytes, dtype=np.int8).reshape(padded_shape)
         return ModelRunResult(
-            output=output[: final.m, :].copy(),
+            output=output[tuple(slice(0, dim) for dim in output_shape)].copy(),
             cycles=cycles,
             model_addr=self.model_addr,
         )
@@ -322,12 +324,12 @@ def _int_field(mapping: dict, key: str, *, default: int | None = None) -> int:
     return value
 
 
-def _shape_field(mapping: dict, key: str) -> tuple[int, int]:
+def _shape_field(mapping: dict, key: str) -> tuple[int, ...]:
     value = mapping.get(key)
     if (
         not isinstance(value, list)
-        or len(value) != 2
-        or not all(isinstance(dim, int) for dim in value)
+        or not value
+        or not all(isinstance(dim, int) and dim > 0 for dim in value)
     ):
-        raise ValueError(f"model manifest field {key} must be a rank-2 integer shape")
-    return (value[0], value[1])
+        raise ValueError(f"model manifest field {key} must be a positive integer shape")
+    return tuple(value)

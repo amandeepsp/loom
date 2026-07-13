@@ -103,14 +103,19 @@ just hw-gemm-reset
 
 ## xDSL Model-Binary Compiler
 
-The `compiler/` package lowers supported quantized ONNX GEMM regions through xDSL/TOSA
-and affine schedules into a loom model binary:
+The `compiler/` package lowers supported quantized ONNX GEMM and MobileNet-v1
+regions through xDSL/TOSA and affine schedules into a loom model binary:
 
-1. **Frontend** (`compiler/frontend/`) — imports supported ONNX quantized GEMM/linear patterns into xDSL TOSA-like ops.
+1. **Frontend** (`compiler/frontend/`) — imports ONNX quantized GEMM/linear patterns and canonicalizes QOperator MobileNet-v1 convolution, ReLU6, global-pool, and classifier regions.
 2. **Dialects** (`compiler/dialects/`) — defines loom IR with `@irdl_op_definition` ops for GEMM, repack, DMA tile loads, tiled MMA, epilogue config, and stores.
 3. **Backend** (`compiler/backend/model.py`) — plans tensor memory, constants, affine tiling, K-reduction, runtime schedule, and model-binary sections.
 4. **Target lowering** (`compiler/backend/riscv_ir.py`, `compiler/backend/riscv_ir_encode.py`) — lowers affine loop schedules through xDSL RISC-V target IR into compact RV32I + CUSTOM0 code with async DMA setup/waits, tiled K reduction, epilogue writes, and result stores.
 5. **Runtime** (`compiler/backend/runtime.py`) — uploads raw quantized int8 input plus the model binary and calls firmware `exec_model`; input/inter-layer packing runs as RV32I code in the model schedule.
+
+MobileNet pointwise and spatial convolutions use the CFU GEMM path. Depthwise
+weights are converted to sparse block-diagonal matrices, while im2col and tile
+packing are generated as structured MLIR and lowered by LLVM to RV32I. The
+runtime boundary for the supplied MobileNet-v1 0.25 model is signed int8 NCHW.
 
 ```sh
 # Train MNIST + export statically-quantized int8 ONNX
@@ -122,6 +127,10 @@ uv run loom-compile-model models/out/mnist_int8.onnx -o build/mnist.lmb \
 # The printed manifest includes deployment.model_addr for exec-model-bin.
 # Add --debug-sections when you want embedded ASM/xDSL IR traces in the .lmb;
 # the default artifact contains only manifest, constants, RISC-V code, and schedule.
+
+# Deterministically quantize + compile MobileNet-v1 0.25 (32x32, 10 classes)
+just mobilenet-model
+# Outputs models/out/mobilenet_v1_025_int8.onnx and build/mobilenet_v1_025.lmb
 
 # Execute a precompiled binary over serial or sim TCP with raw int8 input bytes
 uv run loom-run-model build/mnist.lmb build/input_i8.bin --port /dev/ttyUSB1 \

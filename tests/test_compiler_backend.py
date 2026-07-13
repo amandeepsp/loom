@@ -687,8 +687,18 @@ def test_structured_k_loop_overlaps_next_dma_with_previous_compute():
     dma_wait_indices = [i for i, op in enumerate(body_ops) if isinstance(op, riscv_scf.WhileOp)]
     start_idx = next(i for i, op in enumerate(body_ops) if isinstance(op, ComputeStartOp))
     flag_idx = next(i for i, op in enumerate(body_ops) if isinstance(op, xdsl_riscv.SltiuOp))
+    drain_fence = next(
+        op
+        for op in body_ops
+        if isinstance(op, riscv_scf.ForOp)
+        and int(op.ub.owner.immediate.value.data) == 64
+    )
 
     assert dma_wait_indices
+    assert any(isinstance(op, xdsl_riscv.LwOp) for op in drain_fence.body.block.ops)
+    compute_start = body_ops[start_idx]
+    assert isinstance(compute_start, ComputeStartOp)
+    assert int(compute_start.k_count.owner.immediate.value.data) == 256
     assert any(
         isinstance(op, xdsl_riscv.SwOp)
         and int(op.rs1.owner.immediate.value.data) == _fake_csr_map().act_dma.enable

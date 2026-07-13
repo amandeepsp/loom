@@ -133,6 +133,7 @@ def _k_body(
         loom_riscv.WaitPreviousComputeOp(k_iv),
         _dma_wait_loop(ctx.csr.act_dma.done),
         _dma_wait_loop(ctx.csr.wgt_dma.done),
+        *_dma_drain_fence_ops(ctx.csr.act_dma.done),
         *_dma_stop_ops(ctx.csr.act_dma),
         *_dma_stop_ops(ctx.csr.wgt_dma),
         *flags_ops,
@@ -366,6 +367,21 @@ def _dma_wait_loop(done_addr: int) -> Operation:
     after = Block()
     after.add_ops([riscv_scf.YieldOp()])
     return riscv_scf.WhileOp((), (), Region(before), Region(after))
+
+
+def _dma_drain_fence_ops(status_addr: int) -> list[Operation]:
+    """Wait for issued LiteDRAM reads to reach the scratchpad bridge.
+
+    The DMA `done` CSR tracks request issuance, not response consumption. The
+    readers have at most 16 outstanding responses each. Re-reading the MMIO
+    status register for 64 iterations takes more than 512 CPU clocks and also
+    prevents an empty delay loop from being optimized away.
+    """
+    def poll_body(_iv: SSAValue) -> list[Operation]:
+        addr = rv32.LiOp(status_addr)
+        return [addr, riscv.LwOp(addr.rd, 0)]
+
+    return _for_ops(0, 64, 1, poll_body)
 
 
 def _for_ops(

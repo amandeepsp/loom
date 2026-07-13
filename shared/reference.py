@@ -9,14 +9,18 @@ INT32_MAX = (1 << 31) - 1
 def ref_srdhm(a: int, b: int) -> int:
     """Saturating Rounding Doubling High Multiply.
 
-    Matches hardware: pos_nudge = 1 << 30, neg_nudge = 1 - (1 << 30).
+    Matches gemmlowp: pos_nudge = 1 << 30, neg_nudge = 1 - (1 << 30),
+    followed by signed division that truncates toward zero.
     Saturates INT32_MIN * INT32_MIN -> INT32_MAX.
     """
     if a == INT32_MIN and b == INT32_MIN:
         return INT32_MAX
     ab = a * b
     nudge = (1 << 30) if ab >= 0 else (1 - (1 << 30))
-    return max(INT32_MIN, min(INT32_MAX, (ab + nudge) >> 31))
+    nudged = ab + nudge
+    magnitude = abs(nudged) // (1 << 31)
+    result = magnitude if nudged >= 0 else -magnitude
+    return max(INT32_MIN, min(INT32_MAX, result))
 
 
 def ref_rdbpot(x: int, exponent: int) -> int:

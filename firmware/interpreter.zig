@@ -215,6 +215,7 @@ fn tileMma(state: *PipeState, inst: ir.TileMma) void {
 
     dma.Act.wait();
     dma.Wgt.wait();
+    dma.drainFence();
 
     cfu.computeStart(inst.flags.first, inst.flags.last, inst.k_count);
     state.compute_pending = true;

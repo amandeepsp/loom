@@ -25,7 +25,6 @@ class SRDHM(Elaboratable):
         m = Module()
 
         pos_nudge = 1 << 30
-        neg_nudge = 1 - (1 << 30)
 
         # Combinational: multiply + saturation detect
         ab = Signal(signed(64))
@@ -47,12 +46,16 @@ class SRDHM(Elaboratable):
                 self.done.eq(1),
             ]
 
-        # Combinational tail: sign-dependent nudge + extract high bits
+        # Combinational tail: rounded signed division by 2^31.
         # Matches gemmlowp SaturatingRoundingDoublingHighMul:
-        #   nudge = ab >= 0 ? (1 << 30) : (1 - (1 << 30))
-        nudge = Signal(signed(32))
-        m.d.comb += nudge.eq(Mux(reg_ab[-1], neg_nudge, pos_nudge))
-        m.d.comb += self.out.eq(Mux(reg_saturate, INT32_MAX, (reg_ab + nudge)[31:]))
+        #   (ab + (1 - 2^30)) / 2^31, truncating toward zero, when ab < 0.
+        # For negative values, trunc(x / d) == floor((x + d - 1) / d).
+        # Combining d - 1 with gemmlowp's negative nudge leaves +2^30, the
+        # same nudge as the positive case. This avoids a second wide adder and
+        # remainder reduction in hardware while preserving scalar C++ results.
+        m.d.comb += self.out.eq(
+            Mux(reg_saturate, INT32_MAX, (reg_ab + pos_nudge)[31:])
+        )
 
         return m
 

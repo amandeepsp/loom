@@ -38,6 +38,10 @@ class TestSRDHM:
         [
             (1000000, 1000000),
             (-500000, 300000),
+            # These distinguish gemmlowp's truncation-toward-zero division
+            # from a negative arithmetic right shift (floor division).
+            (-1, 1 << 30),
+            (-3, 1 << 30),
             (INT32_MAX, 1),
             (1, INT32_MAX),
             (INT32_MIN + 1, INT32_MIN + 1),
@@ -82,6 +86,17 @@ class TestSRDHM:
         sim.add_testbench(testbench)
         with sim.write_vcd("waves/test_srdhm_zero.vcd"):
             sim.run()
+
+    @pytest.mark.parametrize(
+        "a, b, expected",
+        [
+            (-1, 1 << 30, 0),
+            (-3, 1 << 30, -1),
+        ],
+    )
+    def test_negative_division_truncates_toward_zero(self, a, b, expected):
+        """Lock down C++ division semantics used by gemmlowp."""
+        assert ref_srdhm(a, b) == expected
 
 
 class TestRDBPOT:

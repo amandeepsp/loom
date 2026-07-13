@@ -1,5 +1,15 @@
 const csr = @import("csr");
 const mmio = @import("mmio.zig");
+const cpu_csr = @import("cpu_csr.zig");
+
+/// LiteDRAMDMAReader's `done` CSR is asserted when the final read request has
+/// been accepted, before all outstanding responses have necessarily reached
+/// the CFU scratchpad bridge. Allow the bounded response/FIFO pipeline to
+/// drain before swapping the scratchpad banks and starting compute.
+pub inline fn drainFence() void {
+    const start = cpu_csr.mcycle.read();
+    while (cpu_csr.mcycle.read() -% start < 512) {}
+}
 
 fn DmaImpl(
     comptime base_addr: usize,

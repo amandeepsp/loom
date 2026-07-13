@@ -22,7 +22,8 @@ __pycache__/
 # Simulation build artifacts
 sim/cfu/build/
 models/*.json
-models/out/
+models/out/*
+!models/out/mobilenet_v1_025_int8.onnx
 
 .codex
 

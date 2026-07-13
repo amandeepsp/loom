@@ -27,16 +27,21 @@ from xdsl.dialects.tosa import AddOp, ConstOp, MulOp, RescaleOp
 from xdsl.ir import SSAValue
 
 from compiler.frontend import emit_tosa_ir, load_model
+from compiler.frontend.qlinear_mobilenet import (
+    QuantizedMobileNetPlan,
+    is_qlinear_mobilenet,
+    parse_qlinear_mobilenet,
+)
 from compiler.frontend.tosa_ext import CastOp, MatMulOp
 from compiler.dialects.loom import (
     GemmOp,
     GemmCandidateOp,
     RepackOp,
 )
-from compiler.dialects.loom_cpu import Pack2DToTilesOp
+from compiler.dialects.loom_cpu import Pack2DToTilesOp, PackConv2DToTilesOp
 from shared.layout import align_up, pack_weight_rows
 
-from .cpu import emit_pack_2d_to_tiles_op
+from .cpu import emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
 from .riscv_ir import RiscvLoweringContext, lower_affine_kernel_to_riscv_scf
 from .riscv_ir_encode import encode_riscv_module
 from .target import CsrMap, GemmTargetSpec
@@ -94,6 +99,7 @@ class GemmKernel:
     riscv_code: bytes
     riscv_asm: str
     requires_repack_from: str | None = None
+    kind: str = "gemm"
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,16 @@ class RiscvFunction:
     name: str
     code: bytes
     asm: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeTensor:
+    buffer: str
+    shape: tuple[int, ...]
+    padded_shape: tuple[int, ...]
+    scale: float | None = None
+    zero_point: int | None = None
+    layout: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +129,8 @@ class CompiledModel:
     loom_module: ModuleOp
     affine_module: ModuleOp
     riscv_module: ModuleOp
+    runtime_input: RuntimeTensor | None = None
+    runtime_output: RuntimeTensor | None = None
 
     def recommended_model_addr(self, *, alignment: int = 32) -> int:
         """Return a non-overlapping runtime RAM address for this model blob."""
@@ -126,6 +144,23 @@ class CompiledModel:
     def manifest(self) -> dict:
         first = self.kernels[0]
         final = self.kernels[-1]
+        if self.runtime_input is None:
+            input_contract = {
+                "buffer": first.input_buffer,
+                "dtype": "int8",
+                "shape": [first.m, first.k],
+            }
+        else:
+            input_contract = _runtime_tensor_manifest(self.runtime_input)
+        if self.runtime_output is None:
+            output_contract = {
+                "buffer": final.output_buffer,
+                "dtype": "int8",
+                "shape": [final.m, final.n],
+                "padded_shape": [final.padded_m, final.n],
+            }
+        else:
+            output_contract = _runtime_tensor_manifest(self.runtime_output)
         return {
             "format": "loom-model",
             "version": MODEL_VERSION,
@@ -138,17 +173,8 @@ class CompiledModel:
             },
             "runtime_contract": {
                 "boundary": "quantized-int8",
-                "input": {
-                    "buffer": first.input_buffer,
-                    "dtype": "int8",
-                    "shape": [first.m, first.k],
-                },
-                "output": {
-                    "buffer": final.output_buffer,
-                    "dtype": "int8",
-                    "shape": [final.m, final.n],
-                    "padded_shape": [final.padded_m, final.n],
-                },
+                "input": input_contract,
+                "output": output_contract,
                 "omitted_boundary_ops": ["input_quantize", "output_dequantize"],
             },
             "buffers": [
@@ -174,6 +200,7 @@ class CompiledModel:
                     "output_buffer": k.output_buffer,
                     "riscv_code_size": len(k.riscv_code),
                     "requires_repack_from": k.requires_repack_from,
+                    "kind": k.kind,
                 }
                 for k in self.kernels
             ],
@@ -294,6 +321,16 @@ def compile_onnx_model(
 ) -> CompiledModel:
     """Load ONNX, emit xDSL TOSA, then compile supported GEMM regions."""
 
+    if is_qlinear_mobilenet(path):
+        return _compile_quantized_mobilenet(
+            parse_qlinear_mobilenet(path),
+            memory_base=memory_base,
+            tile=tile,
+            cfu_word_bits=cfu_word_bits,
+            cfu_store_depth_words=cfu_store_depth_words,
+            csr_json=csr_json,
+        )
+
     return compile_tosa_module(
         emit_tosa_ir(load_model(path)),
         batch_size=batch_size,
@@ -327,6 +364,228 @@ def compile_tosa_module(
         csr_json=csr_json,
         emit_code=True,
     )
+
+
+def _compile_quantized_mobilenet(
+    plan: QuantizedMobileNetPlan,
+    *,
+    memory_base: int,
+    tile: int,
+    cfu_word_bits: int,
+    cfu_store_depth_words: int,
+    csr_json: str | Path | None,
+) -> CompiledModel:
+    """Compile a canonical QOperator MobileNet plan to CPU-pack + CFU GEMMs."""
+
+    _validate_target_params(
+        tile=tile,
+        cfu_word_bits=cfu_word_bits,
+        cfu_store_depth_words=cfu_store_depth_words,
+    )
+    csr_map = _load_csr_map(csr_json)
+    if csr_map is None:
+        raise FileNotFoundError(f"csr.json is required to emit executable GEMM code: {csr_json}")
+
+    planner = _Planner(memory_base, 32)
+    input_size = int(np.prod(plan.input_shape))
+    source = planner.add("mobilenet.input", input_size, "input")
+    input_buffer = source
+    kernels: list[GemmKernel] = []
+    functions: list[RiscvFunction] = []
+    loom_ops = []
+    affine_ops = []
+    riscv_ir_ops = []
+
+    for index, layer in enumerate(plan.layers):
+        transform_addr = 0
+        if layer.input_transform is not None:
+            transform_data = np.ascontiguousarray(
+                layer.input_transform, dtype=np.int8
+            ).tobytes()
+            transform_buffer = planner.add(
+                _buffer_name(index, "input_transform"),
+                len(transform_data),
+                "constant.requant_lut",
+                transform_data,
+            )
+            transform_addr = transform_buffer.addr
+        padded_m = align_up(layer.m, tile)
+        packed_input_size = padded_m * layer.k
+        packed_input = planner.add(
+            _buffer_name(index, "input_packed"),
+            packed_input_size,
+            "activation_packed",
+        )
+        pack_name = _buffer_name(index, "pack_input")
+        if layer.packing is None:
+            pack_op = Pack2DToTilesOp(
+                pack_name,
+                source.name,
+                packed_input.name,
+                src_addr=source.addr,
+                dst_addr=packed_input.addr,
+                transform_addr=transform_addr,
+                m=layer.m,
+                k=layer.k,
+                tile=tile,
+            )
+            pack_code = emit_pack_2d_to_tiles_op(pack_op)
+        else:
+            packing = layer.packing
+            pack_op = PackConv2DToTilesOp(
+                pack_name,
+                source.name,
+                packed_input.name,
+                src_addr=source.addr,
+                dst_addr=packed_input.addr,
+                transform_addr=transform_addr,
+                input_h=packing.input_h,
+                input_w=packing.input_w,
+                channels=packing.channels,
+                output_h=packing.output_h,
+                output_w=packing.output_w,
+                kernel_h=packing.kernel_h,
+                kernel_w=packing.kernel_w,
+                stride_h=packing.stride_h,
+                stride_w=packing.stride_w,
+                pad_top=packing.pad_top,
+                pad_left=packing.pad_left,
+                input_zero_point=layer.input_zero_point,
+                tile=tile,
+                nchw=packing.nchw,
+            )
+            pack_code = emit_pack_conv2d_to_tiles_op(pack_op)
+        loom_ops.append(pack_op)
+        functions.append(RiscvFunction(pack_name, pack_code))
+
+        weight_buffer = planner.add(
+            _buffer_name(index, "weights"),
+            0,
+            "constant.weights",
+            pack_weight_rows(layer.weight, tile),
+        )
+        weight_buffer = _replace_size(planner, weight_buffer, len(weight_buffer.data))
+        output = planner.add(
+            _buffer_name(index, "output"),
+            padded_m * layer.n,
+            "output" if index == len(plan.layers) - 1 else "activation",
+        )
+        bias_buffer = planner.add(
+            _buffer_name(index, "bias"),
+            layer.n * 4,
+            "constant.bias",
+            layer.bias.astype("<i4", copy=False).tobytes(),
+        )
+        multiplier_buffer = planner.add(
+            _buffer_name(index, "multiplier"),
+            layer.n * 4,
+            "constant.multiplier",
+            layer.multiplier.astype("<i4", copy=False).tobytes(),
+        )
+        shift_buffer = planner.add(
+            _buffer_name(index, "shift"),
+            layer.n * 4,
+            "constant.shift",
+            layer.shift.astype("<i4", copy=False).tobytes(),
+        )
+        gemm_op = GemmOp(
+            layer.name,
+            m=layer.m,
+            k=layer.k,
+            n=layer.n,
+            padded_m=padded_m,
+            tile=tile,
+            input_addr=packed_input.addr,
+            weight_addr=weight_buffer.addr,
+            output_addr=output.addr,
+            bias_addr=bias_buffer.addr,
+            multiplier_addr=multiplier_buffer.addr,
+            shift_addr=shift_buffer.addr,
+            output_offset=layer.output_zero_point,
+            activation_min=layer.activation_min,
+            activation_max=layer.activation_max,
+        )
+        loom_ops.append(gemm_op)
+        kernel_affine_module = lower_gemm_to_affine(
+            ModuleOp([gemm_op.clone()]),
+            cfu_word_bits=cfu_word_bits,
+            cfu_store_depth_words=cfu_store_depth_words,
+        )
+        kernel_affine_ops = tuple(op.clone() for op in kernel_affine_module.body.block.ops)
+        affine_ops.extend(op.clone() for op in kernel_affine_ops)
+        target_spec = GemmTargetSpec(
+            m=padded_m,
+            k=layer.k,
+            n=layer.n,
+            tile=tile,
+            input_addr=packed_input.addr,
+            weight_addr=weight_buffer.addr,
+            output_addr=output.addr,
+            bias_addr=bias_buffer.addr,
+            mult_addr=multiplier_buffer.addr,
+            shift_addr=shift_buffer.addr,
+            output_offset=layer.output_zero_point,
+            activation_min=layer.activation_min,
+            activation_max=layer.activation_max,
+            cfu_word_bits=cfu_word_bits,
+            cfu_store_depth_words=cfu_store_depth_words,
+        )
+        kernel_riscv_module = lower_affine_kernel_to_riscv_scf(
+            RiscvLoweringContext(spec=target_spec, csr=csr_map),
+            kernel_affine_ops,
+        )
+        riscv_ir_ops.extend(op.clone() for op in kernel_riscv_module.body.block.ops)
+        riscv_code = encode_riscv_module(kernel_riscv_module)
+        asm = _emit_custom0_asm(layer, padded_m)
+        functions.append(RiscvFunction(layer.name, riscv_code, asm))
+        kernels.append(
+            GemmKernel(
+                name=layer.name,
+                m=layer.m,
+                k=layer.k,
+                n=layer.n,
+                padded_m=padded_m,
+                tile=tile,
+                input_buffer=source.name,
+                packed_input_buffer=packed_input.name,
+                output_buffer=output.name,
+                riscv_code=riscv_code,
+                riscv_asm=asm,
+                requires_repack_from=source.name if index else None,
+                kind=layer.kind,
+            )
+        )
+        source = output
+
+    final = kernels[-1]
+    compiled = CompiledModel(
+        buffers=tuple(planner.buffers),
+        kernels=tuple(kernels),
+        functions=tuple(functions),
+        memory_base=memory_base,
+        entry=kernels[0].name,
+        loom_module=ModuleOp([op.clone() for op in loom_ops]),
+        affine_module=ModuleOp(affine_ops),
+        riscv_module=ModuleOp(riscv_ir_ops),
+        runtime_input=RuntimeTensor(
+            input_buffer.name,
+            plan.input_shape,
+            plan.input_shape,
+            scale=plan.input_scale,
+            zero_point=plan.input_zero_point,
+            layout="NCHW",
+        ),
+        runtime_output=RuntimeTensor(
+            final.output_buffer,
+            plan.output_shape,
+            (final.padded_m, final.n),
+            scale=plan.output_scale,
+            zero_point=plan.output_zero_point,
+            layout="NC",
+        ),
+    )
+    _validate_executable_model(compiled)
+    return compiled
 
 
 def _compile_tosa_module(
@@ -735,6 +994,11 @@ def _functions_from_rewritten_loom(
                 name=op.function_name.data,
                 code=emit_pack_2d_to_tiles_op(op),
             )
+        elif isinstance(op, PackConv2DToTilesOp):
+            yield RiscvFunction(
+                name=op.function_name.data,
+                code=emit_pack_conv2d_to_tiles_op(op),
+            )
         elif isinstance(op, GemmOp):
             yield gemm_functions[op.kernel_name.data]
 
@@ -852,6 +1116,22 @@ def _shape(typ) -> tuple[int, ...]:
     if not isinstance(typ, TensorType):
         raise ValueError(f"expected tensor type, got {typ}")
     return tuple(int(dim) for dim in typ.get_shape())
+
+
+def _runtime_tensor_manifest(tensor: RuntimeTensor) -> dict:
+    result = {
+        "buffer": tensor.buffer,
+        "dtype": "int8",
+        "shape": list(tensor.shape),
+        "padded_shape": list(tensor.padded_shape),
+    }
+    if tensor.scale is not None:
+        result["scale"] = tensor.scale
+    if tensor.zero_point is not None:
+        result["zero_point"] = tensor.zero_point
+    if tensor.layout is not None:
+        result["layout"] = tensor.layout
+    return result
 
 
 def _const_array(value: SSAValue, dtype: np.dtype) -> np.ndarray:

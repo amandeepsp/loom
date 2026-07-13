@@ -12,7 +12,7 @@ from xdsl.dialects import arith, func, llvm, scf
 from xdsl.dialects.builtin import IntegerAttr, ModuleOp, i32, i8, IndexType
 from xdsl.ir import Block, Region
 
-from compiler.dialects.loom_cpu import Pack2DToTilesOp
+from compiler.dialects.loom_cpu import Pack2DToTilesOp, PackConv2DToTilesOp
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +27,7 @@ def emit_pack_2d_to_tiles_op(op: Pack2DToTilesOp) -> bytes:
         str(pack_2d_to_tiles_module(
             src_addr=int(op.src_addr.value.data),
             dst_addr=int(op.dst_addr.value.data),
+            transform_addr=int(op.transform_addr.value.data),
             m=int(op.m.value.data),
             k=int(op.k.value.data),
             tile=int(op.tile.value.data),
@@ -34,7 +35,44 @@ def emit_pack_2d_to_tiles_op(op: Pack2DToTilesOp) -> bytes:
     )
 
 
-def pack_2d_to_tiles_module(*, src_addr: int, dst_addr: int, m: int, k: int, tile: int) -> ModuleOp:
+def emit_pack_conv2d_to_tiles_op(op: PackConv2DToTilesOp) -> bytes:
+    """Lower fused convolution im2col/packing to RV32I code."""
+
+    return lower_mlir_cpu_region_to_rv32i(
+        op.function_name.data,
+        str(
+            pack_conv2d_to_tiles_module(
+                src_addr=int(op.src_addr.value.data),
+                dst_addr=int(op.dst_addr.value.data),
+                transform_addr=int(op.transform_addr.value.data),
+                input_h=int(op.input_h.value.data),
+                input_w=int(op.input_w.value.data),
+                channels=int(op.channels.value.data),
+                output_h=int(op.output_h.value.data),
+                output_w=int(op.output_w.value.data),
+                kernel_h=int(op.kernel_h.value.data),
+                kernel_w=int(op.kernel_w.value.data),
+                stride_h=int(op.stride_h.value.data),
+                stride_w=int(op.stride_w.value.data),
+                pad_top=int(op.pad_top.value.data),
+                pad_left=int(op.pad_left.value.data),
+                input_zero_point=int(op.input_zero_point.value.data),
+                tile=int(op.tile.value.data),
+                nchw=bool(op.nchw.value.data),
+            )
+        ),
+    )
+
+
+def pack_2d_to_tiles_module(
+    *,
+    src_addr: int,
+    dst_addr: int,
+    transform_addr: int = 0,
+    m: int,
+    k: int,
+    tile: int,
+) -> ModuleOp:
     """Build structured xDSL IR for the activation packing CPU region."""
 
     if tile <= 0:
@@ -46,6 +84,8 @@ def pack_2d_to_tiles_module(*, src_addr: int, dst_addr: int, m: int, k: int, til
     dst_i = _i32_const(dst_addr)
     src0 = llvm.IntToPtrOp(src_i.result)
     dst0 = llvm.IntToPtrOp(dst_i.result)
+    transform_i = _i32_const(transform_addr)
+    transform0 = llvm.IntToPtrOp(transform_i.result)
     c0 = _index_const(0)
     c1 = _index_const(1)
     m_const = _index_const(m)
@@ -76,7 +116,22 @@ def pack_2d_to_tiles_module(*, src_addr: int, dst_addr: int, m: int, k: int, til
     src_off = arith.IndexCastOp(src_linear.result, i32)
     src_ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[src_off.result])
     loaded = llvm.LoadOp(src_ptr.result, i8)
-    true_block.add_ops([src_off, src_ptr, loaded, scf.YieldOp(loaded.results[0])])
+    true_ops = [src_off, src_ptr, loaded]
+    loaded_value = loaded.results[0]
+    if transform_addr:
+        c128 = _i32_const(128)
+        extended = arith.ExtSIOp(loaded_value, i32)
+        lut_index = arith.AddiOp(extended.result, c128.result)
+        lut_ptr = llvm.GEPOp(
+            transform0.output,
+            [llvm.GEP_USE_SSA_VAL],
+            i8,
+            ssa_indices=[lut_index.result],
+        )
+        mapped = llvm.LoadOp(lut_ptr.result, i8)
+        true_ops.extend([c128, extended, lut_index, lut_ptr, mapped])
+        loaded_value = mapped.results[0]
+    true_block.add_ops([*true_ops, scf.YieldOp(loaded_value)])
 
     false_block = Block()
     false_block.add_op(scf.YieldOp(zero.result))
@@ -123,11 +178,215 @@ def pack_2d_to_tiles_module(*, src_addr: int, dst_addr: int, m: int, k: int, til
             dst_i,
             src0,
             dst0,
+            transform_i,
+            transform0,
             c0,
             c1,
             m_const,
             k_const,
             tile_const,
+            m_loop,
+            func.ReturnOp(),
+        ]
+    )
+    return ModuleOp([pack_func])
+
+
+def pack_conv2d_to_tiles_module(
+    *,
+    src_addr: int,
+    dst_addr: int,
+    transform_addr: int = 0,
+    input_h: int,
+    input_w: int,
+    channels: int,
+    output_h: int,
+    output_w: int,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_top: int,
+    pad_left: int,
+    input_zero_point: int,
+    tile: int,
+    nchw: bool,
+) -> ModuleOp:
+    """Build RV32I-friendly im2col directly into loom's packed tile layout."""
+
+    if tile <= 0 or not _is_power_of_two(tile):
+        raise ValueError("tile must be a positive power of two")
+
+    src_i = _i32_const(src_addr)
+    dst_i = _i32_const(dst_addr)
+    src0 = llvm.IntToPtrOp(src_i.result)
+    dst0 = llvm.IntToPtrOp(dst_i.result)
+    transform_i = _i32_const(transform_addr)
+    transform0 = llvm.IntToPtrOp(transform_i.result)
+    c0 = _index_const(0)
+    c1 = _index_const(1)
+    m_const = _index_const(output_h * output_w)
+    k_const = _index_const(kernel_h * kernel_w * channels)
+    tile_const = _index_const(tile)
+    output_w_const = _index_const(output_w)
+    kernel_h_const = _index_const(kernel_h)
+    kernel_w_const = _index_const(kernel_w)
+    channels_const = _index_const(channels)
+    input_h_const = _index_const(input_h)
+    input_w_const = _index_const(input_w)
+    stride_h_const = _index_const(stride_h)
+    stride_w_const = _index_const(stride_w)
+    pad_top_const = _index_const(pad_top)
+    pad_left_const = _index_const(pad_left)
+
+    row_block = Block(arg_types=[IndexType()])
+    channel_block = Block(arg_types=[IndexType()])
+    kx_block = Block(arg_types=[IndexType()])
+    ky_block = Block(arg_types=[IndexType()])
+    m_block = Block(arg_types=[IndexType()])
+    row = row_block.args[0]
+    channel = channel_block.args[0]
+    kx = kx_block.args[0]
+    ky = ky_block.args[0]
+    m_base = m_block.args[0]
+
+    out_index = arith.AddiOp(m_base, row)
+    row_in_bounds = arith.CmpiOp(out_index.result, m_const.result, "ult")
+    oh = arith.DivUIOp(out_index.result, output_w_const.result)
+    ow = arith.RemUIOp(out_index.result, output_w_const.result)
+    kernel_pos0 = arith.MuliOp(ky, kernel_w_const.result)
+    kernel_pos = arith.AddiOp(kernel_pos0.result, kx)
+    kk0 = arith.MuliOp(kernel_pos.result, channels_const.result)
+    kk = arith.AddiOp(kk0.result, channel)
+    ih0 = arith.MuliOp(oh.result, stride_h_const.result)
+    ih1 = arith.AddiOp(ih0.result, ky)
+    ih = arith.SubiOp(ih1.result, pad_top_const.result)
+    iw0 = arith.MuliOp(ow.result, stride_w_const.result)
+    iw1 = arith.AddiOp(iw0.result, kx)
+    iw = arith.SubiOp(iw1.result, pad_left_const.result)
+    ih_in_bounds = arith.CmpiOp(ih.result, input_h_const.result, "ult")
+    iw_in_bounds = arith.CmpiOp(iw.result, input_w_const.result, "ult")
+    spatial_in_bounds = arith.AndIOp(ih_in_bounds.result, iw_in_bounds.result)
+    in_bounds = arith.AndIOp(row_in_bounds.result, spatial_in_bounds.result)
+
+    if nchw:
+        src_linear0 = arith.MuliOp(channel, input_h_const.result)
+        src_linear1 = arith.AddiOp(src_linear0.result, ih.result)
+        src_linear2 = arith.MuliOp(src_linear1.result, input_w_const.result)
+        src_linear = arith.AddiOp(src_linear2.result, iw.result)
+    else:
+        src_linear0 = arith.MuliOp(ih.result, input_w_const.result)
+        src_linear1 = arith.AddiOp(src_linear0.result, iw.result)
+        src_linear2 = arith.MuliOp(src_linear1.result, channels_const.result)
+        src_linear = arith.AddiOp(src_linear2.result, channel)
+
+    m_tile = arith.DivUIOp(m_base, tile_const.result)
+    dst_tile0 = arith.MuliOp(m_tile.result, k_const.result)
+    dst_linear0 = arith.AddiOp(dst_tile0.result, kk.result)
+    dst_linear1 = arith.MuliOp(dst_linear0.result, tile_const.result)
+    dst_linear = arith.AddiOp(dst_linear1.result, row)
+    zero_point = _i8_const(input_zero_point)
+
+    true_block = Block()
+    src_off = arith.IndexCastOp(src_linear.result, i32)
+    src_ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[src_off.result])
+    loaded = llvm.LoadOp(src_ptr.result, i8)
+    true_ops = [src_off, src_ptr, loaded]
+    loaded_value = loaded.results[0]
+    if transform_addr:
+        c128 = _i32_const(128)
+        extended = arith.ExtSIOp(loaded_value, i32)
+        lut_index = arith.AddiOp(extended.result, c128.result)
+        lut_ptr = llvm.GEPOp(
+            transform0.output,
+            [llvm.GEP_USE_SSA_VAL],
+            i8,
+            ssa_indices=[lut_index.result],
+        )
+        mapped = llvm.LoadOp(lut_ptr.result, i8)
+        true_ops.extend([c128, extended, lut_index, lut_ptr, mapped])
+        loaded_value = mapped.results[0]
+    true_block.add_ops([*true_ops, scf.YieldOp(loaded_value)])
+    false_block = Block()
+    false_block.add_op(scf.YieldOp(zero_point.result))
+    value_if = scf.IfOp(in_bounds.result, [i8], Region(true_block), Region(false_block))
+    dst_off = arith.IndexCastOp(dst_linear.result, i32)
+    dst_ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[dst_off.result])
+    store = llvm.StoreOp(value_if.results[0], dst_ptr.result)
+    row_block.add_ops(
+        [
+            out_index,
+            row_in_bounds,
+            oh,
+            ow,
+            kernel_pos0,
+            kernel_pos,
+            kk0,
+            kk,
+            ih0,
+            ih1,
+            ih,
+            iw0,
+            iw1,
+            iw,
+            ih_in_bounds,
+            iw_in_bounds,
+            spatial_in_bounds,
+            in_bounds,
+            src_linear0,
+            src_linear1,
+            src_linear2,
+            src_linear,
+            m_tile,
+            dst_tile0,
+            dst_linear0,
+            dst_linear1,
+            dst_linear,
+            zero_point,
+            value_if,
+            dst_off,
+            dst_ptr,
+            store,
+            scf.YieldOp(),
+        ]
+    )
+
+    row_loop = scf.ForOp(c0.result, tile_const.result, c1.result, [], Region(row_block))
+    channel_block.add_ops([row_loop, scf.YieldOp()])
+    channel_loop = scf.ForOp(
+        c0.result, channels_const.result, c1.result, [], Region(channel_block)
+    )
+    kx_block.add_ops([channel_loop, scf.YieldOp()])
+    kx_loop = scf.ForOp(c0.result, kernel_w_const.result, c1.result, [], Region(kx_block))
+    ky_block.add_ops([kx_loop, scf.YieldOp()])
+    ky_loop = scf.ForOp(c0.result, kernel_h_const.result, c1.result, [], Region(ky_block))
+    m_block.add_ops([ky_loop, scf.YieldOp()])
+    m_loop = scf.ForOp(c0.result, m_const.result, tile_const.result, [], Region(m_block))
+
+    pack_func = func.FuncOp("loom_pack_conv2d_to_tiles", ([], []))
+    pack_func.body.block.add_ops(
+        [
+            src_i,
+            dst_i,
+            src0,
+            dst0,
+            transform_i,
+            transform0,
+            c0,
+            c1,
+            m_const,
+            k_const,
+            tile_const,
+            output_w_const,
+            kernel_h_const,
+            kernel_w_const,
+            channels_const,
+            input_h_const,
+            input_w_const,
+            stride_h_const,
+            stride_w_const,
+            pad_top_const,
+            pad_left_const,
             m_loop,
             func.ReturnOp(),
         ]
@@ -158,6 +417,7 @@ def lower_mlir_cpu_region_to_rv32i(name: str, mlir_module: str) -> bytes:
     mlir_translate = _find_tool("mlir-translate", prefer_project=True)
     llc = _find_riscv_llc()
     objcopy = _find_tool("llvm-objcopy", prefer_project=False)
+    readobj = _find_tool("llvm-readobj", prefer_project=False)
 
     with tempfile.TemporaryDirectory(prefix="loom-mlir-cpu-", dir="/tmp") as tmp:
         tmpdir = Path(tmp)
@@ -196,6 +456,13 @@ def lower_mlir_cpu_region_to_rv32i(name: str, mlir_module: str) -> bytes:
                 str(obj),
             ]
         )
+        relocations = _run_output([str(readobj), "--relocations", str(obj)])
+        if ".rela.text" in relocations:
+            raise RuntimeError(
+                f"MLIR CPU lowering for {name} emitted unresolved RISC-V relocations; "
+                "the model runtime loads raw .text and cannot resolve helper calls\n"
+                f"{relocations.strip()}"
+            )
         _run([str(objcopy), "-O", "binary", "-j", ".text", str(obj), str(text)])
         code = text.read_bytes()
     if not code or len(code) % 4 != 0:
@@ -260,3 +527,11 @@ def _run(cmd: list[str]) -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"command failed: {' '.join(cmd)}\n{detail}")
+
+
+def _run_output(cmd: list[str]) -> str:
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"command failed: {' '.join(cmd)}\n{detail}")
+    return result.stdout

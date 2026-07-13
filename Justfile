@@ -55,6 +55,14 @@ mnist-model:
     @test -f models/out/mnist_int8.onnx || \
         uv run python -m models.mnist --epochs 10 --out-dir models/out
 
+# Deterministically quantize and compile MobileNet-v1 0.25 (32x32, 10 classes).
+mobilenet-model:
+    uv run python -m models.mobilenet
+    uv run loom-compile-model models/out/mobilenet_v1_025_int8.onnx \
+        -o build/mobilenet_v1_025.lmb \
+        --csr-json build/sipeed_tang_nano_20k/csr.json \
+        --manifest
+
 # Build firmware targeting the hardware SoC
 hw-firmware build-dir="build/sipeed_tang_nano_20k":
     zig build firmware \

@@ -34,85 +34,20 @@ pub fn build(b: *std.Build) void {
     config.addOption(usize, "cfu_store_depth", cfu_store_depth);
     config.addOption(bool, "debug_info", debug_info);
 
-    // Host Driver
-    const drv_target = b.standardTargetOptions(.{});
-    const drv_optimize = b.standardOptimizeOption(.{});
-
-    const serial_dep = b.dependency("serial", .{
-        .target = drv_target,
-        .optimize = drv_optimize,
-    });
-
-    const driver_mod = b.createModule(.{
-        .root_source_file = b.path("host/driver.zig"),
-        .target = drv_target,
-        .optimize = drv_optimize,
-    });
-    driver_mod.addImport("serial", serial_dep.module("serial"));
-    driver_mod.addImport("protocol", protocol);
-    driver_mod.addImport("ir", ir);
-    driver_mod.addImport("config", config.createModule());
-
-    const drv_lib = b.addLibrary(.{
-        .name = "driver",
-        .linkage = .static,
-        .root_module = driver_mod,
-    });
-
-    const drv_exe = b.addExecutable(.{
-        .name = "driver",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("host/main.zig"),
-            .target = drv_target,
-            .optimize = drv_optimize,
-        }),
-    });
-    drv_exe.root_module.linkLibrary(drv_lib);
-    drv_exe.root_module.addImport("driver", driver_mod);
-    drv_exe.root_module.addImport("ir", ir);
-    drv_exe.root_module.addImport("config", config.createModule());
-    b.installArtifact(drv_exe);
-
-    const drv_c_api_mod = b.createModule(.{
-        .root_source_file = b.path("host/c_api.zig"),
-        .target = drv_target,
-        .optimize = drv_optimize,
-    });
-    drv_c_api_mod.addImport("driver", driver_mod);
-
-    const drv_c_api_lib = b.addLibrary(.{
-        .name = "loom",
-        .linkage = .dynamic,
-        .root_module = drv_c_api_mod,
-    });
-
-    const install_c_api_lib = b.addInstallArtifact(drv_c_api_lib, .{});
-    b.getInstallStep().dependOn(&install_c_api_lib.step);
-
-    const libloom_step = b.step("host-lib", "Build libloom.so");
-    libloom_step.dependOn(&install_c_api_lib.step);
-
-    const run_drv = b.addRunArtifact(drv_exe);
-    run_drv.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_drv.addArgs(args);
-
-    const run_step = b.step("run", "Run the driver");
-    run_step.dependOn(&run_drv.step);
-
-    const drv_tests = b.addTest(.{ .root_module = driver_mod });
-    const run_drv_tests = b.addRunArtifact(drv_tests);
+    // Host-side unit tests for firmware modules
+    const host_target = b.standardTargetOptions(.{});
+    const host_optimize = b.standardOptimizeOption(.{});
 
     const model_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("firmware/model.zig"),
-            .target = drv_target,
-            .optimize = drv_optimize,
+            .target = host_target,
+            .optimize = host_optimize,
         }),
     });
     const run_model_tests = b.addRunArtifact(model_tests);
 
-    const test_step = b.step("test", "Run host driver and firmware model tests");
-    test_step.dependOn(&run_drv_tests.step);
+    const test_step = b.step("test", "Run firmware model tests on the host");
     test_step.dependOn(&run_model_tests.step);
 
     // Device firmware
@@ -133,7 +68,6 @@ pub fn build(b: *std.Build) void {
         "LiteX build directory (default: build/sim)",
     ) orelse "build/sim";
 
-    const root_dir = b.build_root.handle;
     const crt0_path = std.fmt.allocPrint(
         b.allocator,
         "{s}/software/bios/crt0.o",
@@ -147,9 +81,10 @@ pub fn build(b: *std.Build) void {
 
     // Parse CSR addresses from LiteX csr.json (optional, only needed for firmware)
     const csr_options = b.addOptions();
-    const maybe_contents: ?[]u8 = root_dir.readFileAlloc(
+    const csr_json_abs = b.root.joinString(b.allocator, csr_json_path) catch @panic("OOM");
+    const maybe_contents: ?[]u8 = std.Io.Dir.cwd().readFileAlloc(
         b.graph.io,
-        csr_json_path,
+        csr_json_abs,
         b.allocator,
         .limited(4 * 1024 * 1024),
     ) catch null;
@@ -186,10 +121,9 @@ pub fn build(b: *std.Build) void {
 
     // ELF → flat binary
     // Zig's inbuilt objcopy adds zero padding, see: https://github.com/ziglang/zig/issues/25653
-    const objcopy_prog = b.findProgram(
-        &.{ "riscv64-elf-objcopy", "riscv64-unknown-elf-objcopy", "riscv64-linux-gnu-objcopy" },
-        &.{"/usr/bin"},
-    ) catch @panic("no riscv objcopy found in PATH");
+    const objcopy_prog = b.findProgram(.{
+        .names = &.{ "riscv64-elf-objcopy", "riscv64-unknown-elf-objcopy", "riscv64-linux-gnu-objcopy" },
+    }) orelse @panic("no riscv objcopy found in PATH");
     const objcopy = b.addSystemCommand(&.{ objcopy_prog, "-O", "binary" });
     objcopy.addArtifactArg(fw_exe);
     const bin_output = objcopy.addOutputFileArg("firmware.bin");

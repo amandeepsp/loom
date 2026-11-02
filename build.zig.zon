@@ -1,18 +1,12 @@
 .{
     .name = .loom,
     .version = "0.0.0",
-    .dependencies = .{
-        .serial = .{
-            .url = "https://github.com/ZigEmbeddedGroup/serial/tarball/master",
-            .hash = "serial-0.0.1-PoeRzPq5AAAHeo07adkaBjANT4JUaOpNWcnxQGqjxcQY",
-        },
-    },
+    .dependencies = .{},
     .fingerprint = 0xc259713760a3ca28,
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "driver",
         "firmware",
         "shared",
     },

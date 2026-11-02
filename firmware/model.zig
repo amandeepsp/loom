@@ -12,7 +12,7 @@ const section_schedule: u16 = 8;
 
 const sched_call_riscv: u8 = 1;
 
-pub var debug_buf: [8]u8 = [_]u8{0} ** 8;
+pub var debug_buf: [8]u8 = @splat(0);
 
 pub const ExecError = error{
     BadMagic,
@@ -253,7 +253,7 @@ fn setDebug(stage: u8, arg0: u8, arg1: u16, arg2: u32) void {
 }
 
 test "model section parser accepts required sections and ignores debug sections" {
-    var blob = [_]u8{0} ** 96;
+    var blob: [96]u8 = @splat(0);
     writeHeader(blob[0..], 4);
     writeSectionEntry(blob[12..], section_constants, 64, 4);
     writeSectionEntry(blob[24..], section_riscv, 68, 4);
@@ -271,7 +271,7 @@ test "model section parser accepts required sections and ignores debug sections"
 }
 
 test "model section parser rejects bad magic version count and ranges" {
-    var blob = [_]u8{0} ** 64;
+    var blob: [64]u8 = @splat(0);
     writeHeader(blob[0..], 0);
     blob[0] = 'X';
     try std.testing.expectError(error.BadMagic, parseSections(blob[0..]));
@@ -289,7 +289,7 @@ test "model section parser rejects bad magic version count and ranges" {
 }
 
 test "RISC-V section lookup validates index length and alignment" {
-    var sec = [_]u8{0} ** 32;
+    var sec: [32]u8 = @splat(0);
     writeU32(sec[0..4], 1);
     writeU32(sec[4..8], 4);
     writeU16(sec[8..10], 1);
@@ -306,7 +306,7 @@ test "RISC-V section lookup validates index length and alignment" {
 }
 
 test "schedule parser rejects malformed commands before calling code" {
-    var data = [_]u8{0} ** 32;
+    var data: [32]u8 = @splat(0);
     writeU32(data[0..4], 0);
     writeU32(data[8..12], 1);
     data[12] = sched_call_riscv;

@@ -151,17 +151,7 @@ def _epilogue_ops(
     n_iv: SSAValue,
 ) -> list[Operation]:
     return [
-        *_for_ops(
-            0,
-            ctx.spec.tile,
-            1,
-            lambda row_iv: _for_ops(
-                0,
-                n_count,
-                1,
-                lambda col_iv: _epilogue_param_body(ctx, n_iv, row_iv, col_iv),
-            ),
-        ),
+        *_epilogue_params_unrolled(ctx, n_count, n_iv),
         out_zp := rv32.LiOp(ctx.spec.output_offset),
         act_min := rv32.LiOp(ctx.spec.activation_min),
         act_max := rv32.LiOp(ctx.spec.activation_max),
@@ -317,6 +307,46 @@ def _store_result_row_packed(
         addr = riscv.AddOp(lut.rd, read.rd)
         mapped = riscv.LbuOp(addr.rd, 0)
         out.extend([read, addr, mapped, riscv.SbOp(row_ptr.rd, mapped.rd, col * spec.tile)])
+    return out
+
+
+def _epilogue_params_unrolled(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    n_iv: SSAValue,
+) -> list[Operation]:
+    """Upload bias/multiplier/shift for one N tile.
+
+    The CFU keeps one entry per (row, col) result slot, but the values depend
+    only on the column: load each column's three words once (immediate
+    offsets from per-array base registers) and write them to all rows.
+    """
+    spec = ctx.spec
+    out: list[Operation] = []
+    n_bytes = riscv.SlliOp(n_iv, 2)
+    out.append(n_bytes)
+    bases = []
+    for addr in (spec.bias_addr, spec.mult_addr, spec.shift_addr):
+        base0 = rv32.LiOp(addr)
+        base = riscv.AddOp(base0.rd, n_bytes.rd)
+        out += [base0, base]
+        bases.append(base.rd)
+    for col in range(n_count):
+        values = []
+        for base in bases:
+            word = riscv.LwOp(base, 4 * col)
+            out.append(word)
+            values.append(word.rd)
+
+        def row_body(row_iv: SSAValue, col=col, values=values) -> list[Operation]:
+            col_reg = rv32.LiOp(col)
+            channel_ops, channel = _tile_channel(spec, row_iv, col_reg.rd)
+            return [col_reg, *channel_ops, *(
+                loom_riscv.WriteEpilogueParamOp(channel, value, field=field)
+                for field, value in enumerate(values)
+            )]
+
+        out += _for_ops(0, spec.tile, 1, row_body)
     return out
 
 

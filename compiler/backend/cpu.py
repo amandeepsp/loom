@@ -239,63 +239,77 @@ def pack_conv2d_to_tiles_module(
     pad_top_const = _index_const(pad_top)
     pad_left_const = _index_const(pad_left)
 
-    row_block = Block(arg_types=[IndexType()])
-    channel_block = Block(arg_types=[IndexType()])
-    kx_block = Block(arg_types=[IndexType()])
-    ky_block = Block(arg_types=[IndexType()])
+    # Loop nest: m_tile -> row -> ky -> kx -> channel. Bounds checks and the
+    # source/destination bases depend only on (row, ky, kx), so they are
+    # computed once per kernel tap and the innermost channel loop is a plain
+    # strided copy (or zero-point fill for padding taps).
     m_block = Block(arg_types=[IndexType()])
-    row = row_block.args[0]
-    channel = channel_block.args[0]
-    kx = kx_block.args[0]
-    ky = ky_block.args[0]
+    row_block = Block(arg_types=[IndexType()])
+    ky_block = Block(arg_types=[IndexType()])
+    kx_block = Block(arg_types=[IndexType()])
+    copy_block = Block(arg_types=[IndexType()])
+    fill_block = Block(arg_types=[IndexType()])
     m_base = m_block.args[0]
+    row = row_block.args[0]
+    ky = ky_block.args[0]
+    kx = kx_block.args[0]
 
+    # Per (m_base, row): output pixel and destination tile base.
     out_index = arith.AddiOp(m_base, row)
     row_in_bounds = arith.CmpiOp(out_index.result, m_const.result, "ult")
     oh = arith.DivUIOp(out_index.result, output_w_const.result)
     ow = arith.RemUIOp(out_index.result, output_w_const.result)
-    kernel_pos0 = arith.MuliOp(ky, kernel_w_const.result)
-    kernel_pos = arith.AddiOp(kernel_pos0.result, kx)
-    kk0 = arith.MuliOp(kernel_pos.result, channels_const.result)
-    kk = arith.AddiOp(kk0.result, channel)
-    ih0 = arith.MuliOp(oh.result, stride_h_const.result)
-    ih1 = arith.AddiOp(ih0.result, ky)
-    ih = arith.SubiOp(ih1.result, pad_top_const.result)
-    iw0 = arith.MuliOp(ow.result, stride_w_const.result)
-    iw1 = arith.AddiOp(iw0.result, kx)
-    iw = arith.SubiOp(iw1.result, pad_left_const.result)
+    ih_base0 = arith.MuliOp(oh.result, stride_h_const.result)
+    ih_base = arith.SubiOp(ih_base0.result, pad_top_const.result)
+    iw_base0 = arith.MuliOp(ow.result, stride_w_const.result)
+    iw_base = arith.SubiOp(iw_base0.result, pad_left_const.result)
+    m_tile = arith.DivUIOp(m_base, tile_const.result)
+    dst_tile0 = arith.MuliOp(m_tile.result, k_const.result)
+    dst_tile1 = arith.MuliOp(dst_tile0.result, tile_const.result)
+    dst_row = arith.AddiOp(dst_tile1.result, row)
+    row_ops = [out_index, row_in_bounds, oh, ow, ih_base0, ih_base, iw_base0, iw_base,
+               m_tile, dst_tile0, dst_tile1, dst_row]
+
+    # Per kernel tap (ky, kx): bounds, source base, channel stride, dst base.
+    ih = arith.AddiOp(ih_base.result, ky)
+    iw = arith.AddiOp(iw_base.result, kx)
     ih_in_bounds = arith.CmpiOp(ih.result, input_h_const.result, "ult")
     iw_in_bounds = arith.CmpiOp(iw.result, input_w_const.result, "ult")
     spatial_in_bounds = arith.AndIOp(ih_in_bounds.result, iw_in_bounds.result)
     in_bounds = arith.AndIOp(row_in_bounds.result, spatial_in_bounds.result)
-
+    kernel_pos0 = arith.MuliOp(ky, kernel_w_const.result)
+    kernel_pos = arith.AddiOp(kernel_pos0.result, kx)
+    kk0 = arith.MuliOp(kernel_pos.result, channels_const.result)
+    dst_kk = arith.MuliOp(kk0.result, tile_const.result)
+    dst_tap = arith.AddiOp(dst_row.result, dst_kk.result)
     if nchw:
-        src_linear0 = arith.MuliOp(channel, input_h_const.result)
-        src_linear1 = arith.AddiOp(src_linear0.result, ih.result)
-        src_linear2 = arith.MuliOp(src_linear1.result, input_w_const.result)
-        src_linear = arith.AddiOp(src_linear2.result, iw.result)
+        src_tap0 = arith.MuliOp(ih.result, input_w_const.result)
+        src_tap = arith.AddiOp(src_tap0.result, iw.result)
+        plane = arith.MuliOp(input_h_const.result, input_w_const.result)
+        src_cstride = plane
+        src_tap_ops = [src_tap0, src_tap, plane]
     else:
-        src_linear0 = arith.MuliOp(ih.result, input_w_const.result)
-        src_linear1 = arith.AddiOp(src_linear0.result, iw.result)
-        src_linear2 = arith.MuliOp(src_linear1.result, channels_const.result)
-        src_linear = arith.AddiOp(src_linear2.result, channel)
-
-    m_tile = arith.DivUIOp(m_base, tile_const.result)
-    dst_tile0 = arith.MuliOp(m_tile.result, k_const.result)
-    dst_linear0 = arith.AddiOp(dst_tile0.result, kk.result)
-    dst_linear1 = arith.MuliOp(dst_linear0.result, tile_const.result)
-    dst_linear = arith.AddiOp(dst_linear1.result, row)
+        src_tap0 = arith.MuliOp(ih.result, input_w_const.result)
+        src_tap1 = arith.AddiOp(src_tap0.result, iw.result)
+        src_tap = arith.MuliOp(src_tap1.result, channels_const.result)
+        src_cstride = c1
+        src_tap_ops = [src_tap0, src_tap1, src_tap]
     zero_point = _i8_const(input_zero_point)
 
-    true_block = Block()
+    # Innermost: copy one tap's channels (with optional requant LUT).
+    channel = copy_block.args[0]
+    src_c = arith.MuliOp(channel, src_cstride.result)
+    src_linear = arith.AddiOp(src_tap.result, src_c.result)
+    dst_c = arith.MuliOp(channel, tile_const.result)
+    dst_linear = arith.AddiOp(dst_tap.result, dst_c.result)
     src_off = arith.IndexCastOp(src_linear.result, i32)
     src_ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[src_off.result])
     loaded = llvm.LoadOp(src_ptr.result, i8)
-    true_ops = [src_off, src_ptr, loaded]
-    loaded_value = loaded.results[0]
+    copy_ops = [src_c, src_linear, dst_c, dst_linear, src_off, src_ptr, loaded]
+    value = loaded.results[0]
     if transform_addr:
         c128 = _i32_const(128)
-        extended = arith.ExtSIOp(loaded_value, i32)
+        extended = arith.ExtSIOp(value, i32)
         lut_index = arith.AddiOp(extended.result, c128.result)
         lut_ptr = llvm.GEPOp(
             transform0.output,
@@ -304,63 +318,44 @@ def pack_conv2d_to_tiles_module(
             ssa_indices=[lut_index.result],
         )
         mapped = llvm.LoadOp(lut_ptr.result, i8)
-        true_ops.extend([c128, extended, lut_index, lut_ptr, mapped])
-        loaded_value = mapped.results[0]
-    true_block.add_ops([*true_ops, scf.YieldOp(loaded_value)])
-    false_block = Block()
-    false_block.add_op(scf.YieldOp(zero_point.result))
-    value_if = scf.IfOp(in_bounds.result, [i8], Region(true_block), Region(false_block))
+        copy_ops.extend([c128, extended, lut_index, lut_ptr, mapped])
+        value = mapped.results[0]
     dst_off = arith.IndexCastOp(dst_linear.result, i32)
     dst_ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[dst_off.result])
-    store = llvm.StoreOp(value_if.results[0], dst_ptr.result)
-    row_block.add_ops(
-        [
-            out_index,
-            row_in_bounds,
-            oh,
-            ow,
-            kernel_pos0,
-            kernel_pos,
-            kk0,
-            kk,
-            ih0,
-            ih1,
-            ih,
-            iw0,
-            iw1,
-            iw,
-            ih_in_bounds,
-            iw_in_bounds,
-            spatial_in_bounds,
-            in_bounds,
-            src_linear0,
-            src_linear1,
-            src_linear2,
-            src_linear,
-            m_tile,
-            dst_tile0,
-            dst_linear0,
-            dst_linear1,
-            dst_linear,
-            zero_point,
-            value_if,
-            dst_off,
-            dst_ptr,
-            store,
-            scf.YieldOp(),
-        ]
-    )
+    copy_block.add_ops([*copy_ops, dst_off, dst_ptr, llvm.StoreOp(value, dst_ptr.result),
+                        scf.YieldOp()])
 
-    row_loop = scf.ForOp(c0.result, tile_const.result, c1.result, [], Region(row_block))
-    channel_block.add_ops([row_loop, scf.YieldOp()])
-    channel_loop = scf.ForOp(
-        c0.result, channels_const.result, c1.result, [], Region(channel_block)
-    )
-    kx_block.add_ops([channel_loop, scf.YieldOp()])
+    # Padding tap: fill the zero point.
+    fchannel = fill_block.args[0]
+    fdst_c = arith.MuliOp(fchannel, tile_const.result)
+    fdst_linear = arith.AddiOp(dst_tap.result, fdst_c.result)
+    fdst_off = arith.IndexCastOp(fdst_linear.result, i32)
+    fdst_ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[fdst_off.result])
+    fill_block.add_ops([fdst_c, fdst_linear, fdst_off, fdst_ptr,
+                        llvm.StoreOp(zero_point.result, fdst_ptr.result), scf.YieldOp()])
+
+    copy_loop_block = Block()
+    copy_loop_block.add_ops([
+        scf.ForOp(c0.result, channels_const.result, c1.result, [], Region(copy_block)),
+        scf.YieldOp(),
+    ])
+    fill_loop_block = Block()
+    fill_loop_block.add_ops([
+        scf.ForOp(c0.result, channels_const.result, c1.result, [], Region(fill_block)),
+        scf.YieldOp(),
+    ])
+    tap_if = scf.IfOp(in_bounds.result, [], Region(copy_loop_block), Region(fill_loop_block))
+    kx_block.add_ops([
+        ih, iw, ih_in_bounds, iw_in_bounds, spatial_in_bounds, in_bounds,
+        kernel_pos0, kernel_pos, kk0, dst_kk, dst_tap, *src_tap_ops, zero_point,
+        tap_if, scf.YieldOp(),
+    ])
     kx_loop = scf.ForOp(c0.result, kernel_w_const.result, c1.result, [], Region(kx_block))
     ky_block.add_ops([kx_loop, scf.YieldOp()])
     ky_loop = scf.ForOp(c0.result, kernel_h_const.result, c1.result, [], Region(ky_block))
-    m_block.add_ops([ky_loop, scf.YieldOp()])
+    row_block.add_ops([*row_ops, ky_loop, scf.YieldOp()])
+    row_loop = scf.ForOp(c0.result, tile_const.result, c1.result, [], Region(row_block))
+    m_block.add_ops([row_loop, scf.YieldOp()])
     m_loop = scf.ForOp(c0.result, m_const.result, tile_const.result, [], Region(m_block))
 
     pack_func = func.FuncOp("loom_pack_conv2d_to_tiles", ([], []))

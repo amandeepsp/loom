@@ -190,11 +190,50 @@ def main() -> int:
     return 0 if passed else 1
 
 
-def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
-    """Wrong output elements per GEMM layer vs an exact host recomputation.
+def host_pack(layer, source: np.ndarray, tile: int, padded_m: int) -> np.ndarray:
+    """Exact host model of the CPU pack step (im2col / 2-D tiling + LUT).
 
-    Uses the board's packed input for each layer, so it checks the GEMM kernels
-    (DMA, array, epilogue, stores) in isolation from the CPU pack code.
+    `source` is the layer's raw int8 input as the board holds it: the model
+    input (NCHW) for layer 0, else the previous layer's [rows, channels]
+    output. Returns the packed [padded_m/tile, K, tile] bytes, flattened.
+    """
+    lut = None if layer.input_transform is None else np.asarray(layer.input_transform, np.int8)
+
+    def mapped(x: np.ndarray) -> np.ndarray:
+        return x if lut is None else lut[x.astype(np.int16) + 128]
+
+    a = np.zeros((padded_m, layer.k), dtype=np.int8)
+    pk = layer.packing
+    if pk is None:
+        a[: layer.m] = mapped(source[: layer.m * layer.k].reshape(layer.m, layer.k))
+    else:
+        hw = pk.input_h * pk.input_w
+        if pk.nchw:
+            img = source[: pk.channels * hw].reshape(pk.channels, pk.input_h, pk.input_w)
+            img = img.transpose(1, 2, 0)
+        else:
+            img = source.reshape(-1, pk.channels)[:hw].reshape(pk.input_h, pk.input_w, pk.channels)
+        img = mapped(img)
+        a[:] = layer.input_zero_point
+        for m in range(layer.m):
+            oh, ow = divmod(m, pk.output_w)
+            for ky in range(pk.kernel_h):
+                ih = oh * pk.stride_h + ky - pk.pad_top
+                for kx in range(pk.kernel_w):
+                    iw = ow * pk.stride_w + kx - pk.pad_left
+                    if 0 <= ih < pk.input_h and 0 <= iw < pk.input_w:
+                        kk = (ky * pk.kernel_w + kx) * pk.channels
+                        a[m, kk : kk + pk.channels] = img[ih, iw]
+    return a.reshape(padded_m // tile, tile, layer.k).transpose(0, 2, 1).reshape(-1)
+
+
+def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
+    """Wrong bytes per layer vs exact host recomputation, for pack and GEMM.
+
+    `<layer>:pack` compares the board's packed input with host_pack() of the
+    board's own source buffer; `<layer>` compares the GEMM output with an
+    exact recomputation from the board's packed input. Each stage is checked
+    in isolation, so an error is attributed to the step that made it.
     """
     from compiler.frontend.qlinear_mobilenet import parse_qlinear_mobilenet
     from shared.reference import cpu_requantize
@@ -202,6 +241,10 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
     plan = parse_qlinear_mobilenet(onnx_path)
     buffers = {b["name"]: b for b in artifact.manifest["buffers"]}
     errors: dict[str, int] = {}
+    contract = artifact.manifest["runtime_contract"]["input"]
+    prev_out = np.frombuffer(
+        transport.read_mem(buffers[contract["buffer"]]["addr"], buffers[contract["buffer"]]["size"]),
+        np.int8)
     for layer, k in zip(plan.layers, artifact.manifest["kernels"]):
         tile, m, kk, n, pm = k["tile"], k["m"], k["k"], k["n"], k["padded_m"]
         pin = buffers[k["packed_input_buffer"]]
@@ -214,6 +257,13 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
                                   layer.output_zero_point, layer.activation_min,
                                   layer.activation_max)
         errors[k["name"]] = int((actual[:m] != expected[:m]).sum())
+        want = host_pack(layer, prev_out, tile, pm)
+        got = packed.reshape(pm // tile, kk, tile)
+        want3 = want.reshape(pm // tile, kk, tile)
+        # Only real rows are defined for the 2-D pack; conv packs define all.
+        rows = np.arange(pm).reshape(pm // tile, 1, tile) < (m if layer.packing is None else pm)
+        errors[k["name"] + ":pack"] = int(((got != want3) & rows).sum())
+        prev_out = actual.reshape(-1)
     return errors
 
 

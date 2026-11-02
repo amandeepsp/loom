@@ -68,26 +68,17 @@ pytest configured in `pyproject.toml` to include these paths.
 # Train/export the quantized MNIST ONNX if missing
 just mnist-model
 
-# Compile ONNX to a deploy .lmb for the current hardware CSR map
-uv run loom-compile-model models/out/mnist_int8.onnx \
-  -o build/mnist.lmb \
-  --csr-json build/sipeed_tang_nano_20k/csr.json \
-  --manifest
+# What is the board doing? (firmware / BIOS prompt / silent)
+uv run loom board
 
-# Emit deterministic raw int8 input/expected files plus .lmb
-uv run python -m tools.mnist_artifact \
-  --onnx models/out/mnist_int8.onnx \
-  --csr-json build/sipeed_tang_nano_20k/csr.json \
-  --model build/mnist.lmb \
-  --input build/mnist_input_i8.bin \
-  --expected build/mnist_expected_i8.bin
+# Compile ONNX to a .lmb for the current hardware CSR map (records source ONNX + hash)
+uv run loom compile models/out/mnist_int8.onnx -o build/mnist.lmb \
+  --csr-json build/sipeed_tang_nano_20k/csr.json
 
-# Run a precompiled .lmb on board or sim
-uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
-  --port /dev/ttyUSB1 \
-  --expect-output build/mnist_expected_i8.bin \
-  --tolerance 2 \
-  --check-prediction
+# Run real test images (MNIST / CIFAR-10 picked from the input shape) and check
+# each against a fresh ONNX Runtime reference; the model uploads once per run
+uv run loom run build/mnist.lmb --count 20 --tolerance 1
+uv run loom run build/mnist.lmb --input raw_i8.bin       # raw int8 input instead
 ```
 
 ## Build Order (Critical)
@@ -129,7 +120,9 @@ When tuning hardware, update Justfile variables — they propagate to both Veril
 
 Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, and `firmware/interpreter.zig`.
 
-Changing the `.lmb` model binary requires sync across `compiler/backend/model.py`, `compiler/backend/runtime.py`, `firmware/model.zig`, and host/transport tests.
+Changing the `.lmb` model binary requires sync across `compiler/backend/model.py`, `compiler/backend/runtime.py`, `firmware/model.zig`, and `tests/test_reference.py` / `tests/test_model_runtime.py`.
+
+Numerics are checked against ONNX Runtime (`compiler/backend/reference.py`), never against hand-copied quantization constants — those went stale once already and hid a broken requantization shift.
 
 ## xDSL Compiler Pipeline
 

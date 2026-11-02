@@ -162,12 +162,12 @@ uv run loom-compile-model models/out/mnist_int8.onnx -o build/mnist.lmb \
 just mobilenet-model
 # Outputs models/out/mobilenet_v1_025_int8.onnx and build/mobilenet_v1_025.lmb
 
-# Execute a precompiled binary over serial or sim TCP with raw int8 input bytes
-uv run loom-run-model build/mnist.lmb build/input_i8.bin --port /dev/ttyUSB1 \
-  -o build/output_i8.bin --expect-output build/expected_i8.bin \
-  --tolerance 2 --check-prediction
+# Run real test images on the board, checked against a fresh ONNX reference
+uv run loom board                                  # firmware / BIOS / silent?
+uv run loom run build/mnist.lmb --count 20 --tolerance 1
+uv run loom run build/mobilenet_v1_025.lmb --count 10
 
-# Compile MNIST to a .lmb and run it through loom-run-model on the board / sim
+# Compile MNIST and run it on the board / sim in one step
 just mnist
 just mnist sim
 ```

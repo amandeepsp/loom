@@ -36,6 +36,7 @@ dependencies = [
 litex-upload-once = "tools.litex_upload_once:main"
 loom-compile-model = "compiler.backend.__main__:main"
 loom-run-model = "compiler.backend.run_model:main"
+loom = "tools.loom_cli:main"
 [tool.setuptools.packages.find]
 include = ["tools*", "compiler*", "shared*"]
 namespaces = true

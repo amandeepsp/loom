@@ -9,6 +9,8 @@ import time
 
 import serial
 
+from shared.protocol import DEFAULT_BAUD
+
 
 SFL_MAGIC_REQ = b"sL5DdSMmkekro\n"
 SFL_MAGIC_ACK = b"z6IHG7cYDID6o\n"
@@ -119,7 +121,7 @@ def main() -> int:
     )
     parser.add_argument("port", help="Serial port, for example /dev/ttyUSB1.")
     parser.add_argument("kernel", help="Kernel image to upload.")
-    parser.add_argument("--speed", type=int, default=115200, help="Serial baudrate.")
+    parser.add_argument("--speed", type=int, default=DEFAULT_BAUD, help="Serial baudrate (LOOM_BAUD).")
     parser.add_argument("--base", type=lambda x: int(x, 0), default=0x40000000, help="Kernel load address.")
     parser.add_argument(
         "--chunk-size",

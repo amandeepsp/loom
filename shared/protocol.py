@@ -6,6 +6,7 @@ header packing, and error handling.
 
 from __future__ import annotations
 
+import os
 import socket as _socket
 import struct
 from dataclasses import dataclass
@@ -92,6 +93,10 @@ class FramingProtocol:
         return bytes(chunks)
 
 
+# Must match the SoC build (`--uart-baudrate`); override with LOOM_BAUD.
+DEFAULT_BAUD = int(os.environ.get("LOOM_BAUD", "115200"))
+
+
 class BaseTransport:
     """Common transport logic: chunked mem ops + exec over FramingProtocol."""
 
@@ -166,7 +171,7 @@ class TcpTransport(BaseTransport):
 class SerialTransport(BaseTransport):
     """Transport over a physical serial port using pyserial."""
 
-    def __init__(self, port: str, baud_rate: int = 115200, timeout_s: float = 120):
+    def __init__(self, port: str, baud_rate: int = DEFAULT_BAUD, timeout_s: float = 120):
         super().__init__()
         import serial
 

@@ -168,7 +168,7 @@ def open_transport(port: str, timeout_s: float):
     """Return a TcpTransport or SerialTransport depending on port format."""
     if port.startswith("tcp://"):
         return TcpTransport(port, timeout_s=timeout_s)
-    return SerialTransport(port, baud_rate=115200, timeout_s=timeout_s)
+    return SerialTransport(port, timeout_s=timeout_s)
 
 
 def main() -> int:

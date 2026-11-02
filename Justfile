@@ -131,18 +131,17 @@ gemm-sweep target="hw":
     just gemm {{ target }}
     just gemm {{ target }} {{ cfu_rows }} "$(( ({{ cfu_store_depth }} * 4 / {{ cfu_rows }}) + 128 ))" {{ cfu_cols }}
 
-# Compile MNIST to a .lmb and run it on hw or sim via loom-run-model.
-mnist target="hw" tolerance="2": mnist-model (_run-deps target)
-    uv run python -m tools.mnist_artifact \
-        --onnx models/out/mnist_int8.onnx \
-        --csr-json {{ if target == "sim" { sim_dir } else { hw_dir } }}/csr.json \
-        --model build/mnist.lmb --input build/mnist_input_i8.bin \
-        --expected build/mnist_expected_i8.bin
+# Compile MNIST and run real test digits on hw or sim, checked against ONNX.
+mnist target="hw" count="10" tolerance="1": mnist-model (_run-deps target)
+    uv run loom compile models/out/mnist_int8.onnx -o build/mnist.lmb \
+        --csr-json {{ if target == "sim" { sim_dir } else { hw_dir } }}/csr.json
     {{ if target == "sim" { _sim_launch } else { "" } }} \
-    uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
-        --port {{ if target == "sim" { "tcp://127.0.0.1:" + sim_port } else { port } }} \
-        --expect-output build/mnist_expected_i8.bin --tolerance {{ tolerance }} \
-        --check-prediction -o build/mnist_output_i8.bin
+    uv run loom run build/mnist.lmb --count {{ count }} --tolerance {{ tolerance }} \
+        --port {{ if target == "sim" { "tcp://127.0.0.1:" + sim_port } else { port } }}
+
+# Run MobileNet on real CIFAR-10 test images (first run uploads ~2 MiB).
+mobilenet count="10":
+    uv run loom run build/mobilenet_v1_025.lmb --count {{ count }} --port {{ port }}
 
 # sim needs fresh sim firmware; hw assumes the board is already `up`.
 _run-deps target:

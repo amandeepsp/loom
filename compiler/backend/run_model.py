@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from shared.protocol import SerialTransport, TcpTransport
+from shared.protocol import DEFAULT_BAUD, SerialTransport, TcpTransport
 
 from .runtime import ModelBinaryArtifact, ModelBinaryRuntime
 
@@ -17,7 +17,7 @@ def main() -> int:
     parser.add_argument("model", help="Path to a .lmb model binary.")
     parser.add_argument("input", help="Raw int8 input tensor bytes.")
     parser.add_argument("--port", default="/dev/ttyUSB1")
-    parser.add_argument("--baud-rate", type=int, default=115200)
+    parser.add_argument("--baud-rate", type=int, default=DEFAULT_BAUD)
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--model-addr", type=lambda text: int(text, 0), default=None)
     parser.add_argument("-o", "--output", help="Optional path for raw int8 output tensor bytes.")

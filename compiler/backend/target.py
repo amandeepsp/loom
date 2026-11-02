@@ -15,6 +15,9 @@ class DmaRegs:
     done: int
     loop: int
     offset: int
+    # Status: done *and* every beat delivered to the scratchpad. Present on
+    # bitstreams with the `drained` CSR; when set, no delay fence is needed.
+    drained: int | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class CsrMap:
         def reg(name: str) -> int:
             return int(regs[name]["addr"])
 
+        def opt(name: str) -> int | None:
+            return int(regs[name]["addr"]) if name in regs else None
+
         return CsrMap(
             act_dma=DmaRegs(
                 reg("act_dma_base"),
@@ -37,6 +43,7 @@ class CsrMap:
                 reg("act_dma_done"),
                 reg("act_dma_loop"),
                 reg("act_dma_offset"),
+                opt("act_dma_drained"),
             ),
             wgt_dma=DmaRegs(
                 reg("wgt_dma_base"),
@@ -45,6 +52,7 @@ class CsrMap:
                 reg("wgt_dma_done"),
                 reg("wgt_dma_loop"),
                 reg("wgt_dma_offset"),
+                opt("wgt_dma_drained"),
             ),
         )
 

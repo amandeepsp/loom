@@ -136,9 +136,7 @@ def _k_body(
         *_dma_kick_ops(ctx.csr.act_dma, act_addr, region.k_count * ctx.spec.tile),
         *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, region.k_count * ctx.spec.tile),
         loom_riscv.WaitPreviousComputeOp(k_iv),
-        _dma_wait_loop(ctx.csr.act_dma.done),
-        _dma_wait_loop(ctx.csr.wgt_dma.done),
-        *_dma_drain_fence_ops(ctx.csr.act_dma.done),
+        *_dma_complete_ops(ctx.csr),
         *_dma_stop_ops(ctx.csr.act_dma),
         *_dma_stop_ops(ctx.csr.wgt_dma),
         *flags_ops,
@@ -380,6 +378,18 @@ def _dma_wait_loop(done_addr: int) -> Operation:
     after = Block()
     after.add_ops([riscv_scf.YieldOp()])
     return riscv_scf.WhileOp((), (), Region(before), Region(after))
+
+
+def _dma_complete_ops(csr) -> list[Operation]:
+    """Wait until both DMA transfers have fully landed in the scratchpads."""
+    if csr.act_dma.drained is not None and csr.wgt_dma.drained is not None:
+        # Hardware reports delivery directly; no delay fence required.
+        return [_dma_wait_loop(csr.act_dma.drained), _dma_wait_loop(csr.wgt_dma.drained)]
+    return [
+        _dma_wait_loop(csr.act_dma.done),
+        _dma_wait_loop(csr.wgt_dma.done),
+        *_dma_drain_fence_ops(csr.act_dma.done),
+    ]
 
 
 def _dma_drain_fence_ops(status_addr: int) -> list[Operation]:

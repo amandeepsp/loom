@@ -43,7 +43,7 @@ from compiler.dialects.loom import (
 from compiler.dialects.loom_cpu import Pack2DToTilesOp, PackConv2DToTilesOp
 from shared.layout import align_up, pack_weight_rows
 
-from .cpu import emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
+from .cpu import emit_lut_map, emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
 from .riscv_ir import RiscvLoweringContext, lower_affine_kernel_to_riscv_scf
 from .riscv_ir_encode import encode_riscv_module
 from .target import CsrMap, GemmTargetSpec
@@ -568,13 +568,28 @@ def _compile_quantized_mobilenet(
             pack_code = emit_pack_2d_to_tiles_op(pack_op)
         else:
             packing = layer.packing
+            pack_src_addr = source.addr
+            pack_transform_addr = transform_addr
+            lut_bytes = packing.input_h * packing.input_w * packing.channels
+            if (transform_addr and packing.kernel_h * packing.kernel_w > 1
+                    and not packing.nchw and lut_bytes % 4 == 0):
+                # Each source byte feeds up to kernel_h*kernel_w taps; apply
+                # the requant LUT once into a scratch copy, pack without it.
+                lut_scratch = planner.add(_buffer_name(index, "input_lut_mapped"),
+                                          lut_bytes, "activation")
+                lut_name = _buffer_name(index, "lut_map")
+                functions.append(RiscvFunction(lut_name, emit_lut_map(
+                    lut_name, src_addr=source.addr, dst_addr=lut_scratch.addr,
+                    n_bytes=lut_bytes, lut_addr=transform_addr)))
+                pack_src_addr = lut_scratch.addr
+                pack_transform_addr = 0
             pack_op = PackConv2DToTilesOp(
                 pack_name,
                 source.name,
                 packed_input.name,
-                src_addr=source.addr,
+                src_addr=pack_src_addr,
                 dst_addr=packed_input.addr,
-                transform_addr=transform_addr,
+                transform_addr=pack_transform_addr,
                 channel_major=taps is not None,
                 input_h=packing.input_h,
                 input_w=packing.input_w,
@@ -1148,7 +1163,14 @@ def _validate_executable_model(compiled: CompiledModel) -> None:
     expected_functions = []
     for index, kernel in enumerate(compiled.kernels):
         expected_functions.extend((_buffer_name(index, "pack_input"), kernel.name))
-    actual_functions = [fn.name for fn in compiled.functions]
+    names = [fn.name for fn in compiled.functions]
+    # Optional "<gemmN>.lut_map" pre-pass must directly precede "<gemmN>.pack_input".
+    for i, name in enumerate(names):
+        if name.endswith(".lut_map"):
+            want = name.removesuffix(".lut_map") + ".pack_input"
+            if i + 1 >= len(names) or names[i + 1] != want:
+                raise ValueError(f"{name} must directly precede {want}")
+    actual_functions = [n for n in names if not n.endswith(".lut_map")]
     if actual_functions != expected_functions:
         raise ValueError(
             "model schedule functions do not match planned kernels: "

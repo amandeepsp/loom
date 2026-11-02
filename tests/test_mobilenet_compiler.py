@@ -36,7 +36,11 @@ def test_compile_mobilenet_emits_llvm_cpu_packers_and_cfu_gemms():
     compiled = compile_onnx_model(MODEL)
 
     assert len(compiled.kernels) == 29
-    assert len(compiled.functions) == 58
+    names = [function.name for function in compiled.functions]
+    lut_maps = [name for name in names if name.endswith(".lut_map")]
+    # pack + GEMM per layer, plus a one-pass LUT pre-map for each 3x3 depthwise.
+    assert len(names) - len(lut_maps) == 58
+    assert len(lut_maps) == 13
     assert all(function.code and len(function.code) % 4 == 0 for function in compiled.functions)
     ops = tuple(compiled.loom_module.body.block.ops)
     assert len(ops) == 58

@@ -19,6 +19,59 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LLVM_PROJECT_BIN = REPO_ROOT.parent / "llvm-project" / "build" / "bin"
 
 
+def emit_lut_map(name: str, *, src_addr: int, dst_addr: int, n_bytes: int, lut_addr: int) -> bytes:
+    """RV32I code for dst[i] = lut[src[i] + 128], one 32-bit word at a time."""
+
+    if n_bytes % 4:
+        raise ValueError("lut map length must be a multiple of 4")
+    src0 = llvm.IntToPtrOp((src_i := _i32_const(src_addr)).result)
+    dst0 = llvm.IntToPtrOp((dst_i := _i32_const(dst_addr)).result)
+    lut0 = llvm.IntToPtrOp((lut_i := _i32_const(lut_addr)).result)
+    c0, c1 = _index_const(0), _index_const(1)
+    n_words = _index_const(n_bytes // 4)
+    c128 = _i32_const(128)
+    c255 = _i32_const(255)
+    shifts = [_i32_const(8 * b) for b in range(4)]
+    body = Block(arg_types=[IndexType()])
+    word_i = body.args[0]
+    ops: list = []
+    off0 = arith.IndexCastOp(word_i, i32)
+    c4 = _i32_const_op(ops, 4)
+    off = arith.MuliOp(off0.result, c4.result)
+    sptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+    word = llvm.LoadOp(sptr.result, i32, alignment=4)
+    ops += [off0, off, sptr, word]
+    out = None
+    for b in range(4):
+        byte = arith.ShRUIOp(word.results[0], shifts[b].result) if b else None
+        raw = arith.AndIOp((byte.result if byte else word.results[0]), c255.result)
+        # sign-extend the byte: ((raw ^ 128) - 128) + 128 == raw ^ 128
+        idx = arith.XOrIOp(raw.result, c128.result)
+        lptr = llvm.GEPOp(lut0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[idx.result])
+        mapped = llvm.LoadOp(lptr.result, i8)
+        wide = arith.ExtUIOp(mapped.results[0], i32)
+        ops += ([byte] if byte else []) + [raw, idx, lptr, mapped, wide]
+        part = wide.result
+        if b:
+            sh = arith.ShLIOp(part, shifts[b].result)
+            ops.append(sh)
+            part = sh.result
+        if out is None:
+            out = part
+        else:
+            acc = arith.OrIOp(out, part)
+            ops.append(acc)
+            out = acc.result
+    dptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+    ops += [dptr, llvm.StoreOp(out, dptr.result, alignment=4)]
+    body.add_ops([*ops, scf.YieldOp()])
+    loop = scf.ForOp(c0.result, n_words.result, c1.result, [], Region(body))
+    fn = func.FuncOp("loom_lut_map", ([], []))
+    fn.body.block.add_ops([src_i, src0, dst_i, dst0, lut_i, lut0, c0, c1, n_words, c128,
+                           c255, *shifts, loop, func.ReturnOp()])
+    return lower_mlir_cpu_region_to_rv32i(name, str(ModuleOp([fn])))
+
+
 def emit_pack_2d_to_tiles_op(op: Pack2DToTilesOp) -> bytes:
     """Lower a rewritten loom_cpu pack operation to RV32I code."""
 

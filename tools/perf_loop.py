@@ -138,7 +138,8 @@ def main() -> int:
     rows = profile_rows(artifact.manifest, profile)
     by_kind: dict[str, int] = {}
     for name, c in rows:
-        kind = "load_constants" if name.startswith("(") else "pack" if "pack" in name else "gemm"
+        kind = ("load_constants" if name.startswith("(")
+                else "pack" if ("pack" in name or "lut_map" in name) else "gemm")
         by_kind[kind] = by_kind.get(kind, 0) + c
     # Steady state = last image (one-time work like constant loading is
     # paid by the first); first-image cycles are logged alongside.

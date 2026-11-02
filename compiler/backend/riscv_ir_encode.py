@@ -124,6 +124,11 @@ class _RiscvModuleEncoder:
                 rd = self._define(op.rd)
                 self.builder.emit(riscv.lw(rd, rs1, int(op.immediate.value.data)))
                 self._finish_op(op)
+            case xdsl_riscv.LbuOp():
+                rs1 = self._use(op.rs1)
+                rd = self._define(op.rd)
+                self.builder.emit(riscv.lbu(rd, rs1, int(op.immediate.value.data)))
+                self._finish_op(op)
             case xdsl_riscv.SwOp():
                 rs1 = self._use(op.rs1)
                 rs2 = self._use(op.rs2)

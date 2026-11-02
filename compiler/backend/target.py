@@ -78,6 +78,11 @@ class GemmTargetSpec:
     # M tile (default: k), and N tile n reads rows starting at n * input_n_k_offset.
     input_k_stride: int = 0
     input_n_k_offset: int = 0
+    # Fused store: write results straight into the next layer's packed tile
+    # layout ([m/tile][n][tile]) through a 384-byte rebased requant LUT,
+    # replacing the next layer's separate pack step.
+    packed_output_addr: int = 0
+    store_lut_addr: int = 0
 
     @property
     def a_k_stride(self) -> int:

@@ -199,6 +199,8 @@ def _store_result_row(
     n_iv: SSAValue,
     row_iv: SSAValue,
 ) -> list[Operation]:
+    if ctx.spec.packed_output_addr:
+        return _store_result_row_packed(ctx, n_count, m_iv, n_iv, row_iv)
     m_row = riscv.AddOp(m_iv, row_iv)
     row_offset_ops, row_offset = _mul_const(m_row.rd, ctx.spec.n)
     col0 = riscv.AddOp(row_offset, n_iv)
@@ -216,6 +218,44 @@ def _store_result_row(
             index = step.rd
         read = loom_riscv.ReadResultOp(index)
         out.extend([read, riscv.SbOp(row_ptr.rd, read.rd, col)])
+    return out
+
+
+def _store_result_row_packed(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    m_iv: SSAValue,
+    n_iv: SSAValue,
+    row_iv: SSAValue,
+) -> list[Operation]:
+    """Store one tile row into the next layer's packed layout via its LUT.
+
+    Packed index of (m, c) is (m // tile) * N * tile + c * tile + m % tile;
+    with m_iv a multiple of tile that is m_iv * N + n * tile + col * tile + row,
+    so column `col` is a constant `col * tile` from the row pointer.
+    """
+    spec = ctx.spec
+    m_off_ops, m_off = _mul_const(m_iv, spec.n)
+    n_off_ops, n_off = _mul_const(n_iv, spec.tile)
+    t0 = riscv.AddOp(m_off, n_off.rd if hasattr(n_off, "rd") else n_off)
+    t1 = riscv.AddOp(t0.rd, row_iv)
+    base = rv32.LiOp(spec.packed_output_addr)
+    row_ptr = riscv.AddOp(base.rd, t1.rd)
+    lut = rv32.LiOp(spec.store_lut_addr + 128)
+    zero = rv32.LiOp(0)
+    index_ops, index_base = _tile_channel(spec, row_iv, zero.rd)
+    out: list[Operation] = [*m_off_ops, *n_off_ops, t0, t1, base, row_ptr, lut, zero, *index_ops]
+    for col in range(n_count):
+        if col == 0:
+            index = index_base
+        else:
+            step = riscv.AddiOp(index_base, col)
+            out.append(step)
+            index = step.rd
+        read = loom_riscv.ReadResultOp(index)
+        addr = riscv.AddOp(lut.rd, read.rd)
+        mapped = riscv.LbuOp(addr.rd, 0)
+        out.extend([read, addr, mapped, riscv.SbOp(row_ptr.rd, mapped.rd, col * spec.tile)])
     return out
 
 

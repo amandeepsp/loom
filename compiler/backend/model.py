@@ -102,6 +102,9 @@ class GemmKernel:
     riscv_asm: str
     requires_repack_from: str | None = None
     kind: str = "gemm"
+    # Name of the kernel whose result store writes this kernel's packed input
+    # directly (fused pack); such kernels have no separate pack function.
+    packed_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,7 @@ class CompiledModel:
                     "riscv_code_size": len(k.riscv_code),
                     "requires_repack_from": k.requires_repack_from,
                     "kind": k.kind,
+                    "packed_by": k.packed_by,
                 }
                 for k in self.kernels
             ],
@@ -545,6 +549,7 @@ def _compile_quantized_mobilenet(
     affine_ops = []
     riscv_ir_ops = []
 
+    fused_packs: dict[int, Buffer] = {}  # layer index -> packed buffer its producer fills
     for index, layer in enumerate(plan.layers):
         transform_addr = 0
         if layer.input_transform is not None:
@@ -560,7 +565,8 @@ def _compile_quantized_mobilenet(
             transform_addr = transform_buffer.addr
         padded_m = align_up(layer.m, tile)
         packed_input_size = padded_m * layer.k
-        packed_input = planner.add(
+        prepacked = fused_packs.pop(index, None)
+        packed_input = prepacked or planner.add(
             _buffer_name(index, "input_packed"),
             packed_input_size,
             "activation_packed",
@@ -622,7 +628,7 @@ def _compile_quantized_mobilenet(
                 nchw=packing.nchw,
             )
             pack_code = emit_pack_conv2d_to_tiles_op(pack_op)
-        if cpu_taps is None:
+        if cpu_taps is None and prepacked is None:
             loom_ops.append(pack_op)
             functions.append(RiscvFunction(pack_name, pack_code))
 
@@ -709,7 +715,25 @@ def _compile_quantized_mobilenet(
         )
         kernel_affine_ops = tuple(op.clone() for op in kernel_affine_module.body.block.ops)
         affine_ops.extend(op.clone() for op in kernel_affine_ops)
+        # F1: if the next layer is a pointwise conv fed by a 2-D pack + LUT,
+        # store this layer's results straight into its packed layout.
+        fused_addr = fused_lut_addr = 0
+        nxt = plan.layers[index + 1] if index + 1 < len(plan.layers) else None
+        if (nxt is not None and nxt.packing is None and nxt.kind == "conv2d"
+                and nxt.input_transform is not None and nxt.k == layer.n and nxt.m == layer.m
+                and block_diagonal_2d_taps(nxt) is None):
+            fused = planner.add(_buffer_name(index + 1, "input_packed"),
+                                padded_m * nxt.k, "activation_packed")
+            fused_packs[index + 1] = fused
+            lut = np.asarray(nxt.input_transform, dtype=np.int8)
+            offsets = np.arange(-128, 256)
+            rebased = lut[np.where(offsets < 128, offsets, offsets - 256) + 128]
+            store_lut = planner.add(_buffer_name(index + 1, "store_lut"), len(rebased),
+                                    "constant.requant_lut", rebased.astype(np.int8).tobytes())
+            fused_addr, fused_lut_addr = fused.addr, store_lut.addr
         target_spec = GemmTargetSpec(
+            packed_output_addr=fused_addr,
+            store_lut_addr=fused_lut_addr,
             m=padded_m,
             k=gemm_k,
             n=layer.n,
@@ -751,6 +775,7 @@ def _compile_quantized_mobilenet(
                 riscv_asm=asm,
                 requires_repack_from=source.name if index else None,
                 kind=layer.kind,
+                packed_by=plan.layers[index - 1].name if prepacked is not None else None,
             )
         )
         source = output
@@ -1204,7 +1229,9 @@ def _functions_from_rewritten_loom(
 def _validate_executable_model(compiled: CompiledModel) -> None:
     expected_functions = []
     for index, kernel in enumerate(compiled.kernels):
-        if not kernel.kind.endswith("_cpu"):  # CPU kernels read their input directly
+        # CPU kernels read their input directly; fused kernels get it packed
+        # by their producer's result store.
+        if not kernel.kind.endswith("_cpu") and kernel.packed_by is None:
             expected_functions.append(_buffer_name(index, "pack_input"))
         expected_functions.append(kernel.name)
     names = [fn.name for fn in compiled.functions]

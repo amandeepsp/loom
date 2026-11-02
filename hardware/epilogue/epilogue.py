@@ -9,7 +9,7 @@ Pipeline: +bias (comb) -> SRDHM (1 reg stage) -> RDBPOT (comb)
 Latency: 1 cycle (SRDHM register). Throughput: 1 result/cycle after fill.
 """
 
-from amaranth import Array, Module, Signal, signed, unsigned
+from amaranth import Array, Cat, Module, Signal, signed, unsigned
 from amaranth.lib.data import StructLayout
 from amaranth.lib.enum import IntEnum
 from amaranth.lib.memory import Memory
@@ -55,6 +55,7 @@ class Epilogue(Component):
             # Result readback (active any time, outside pipeline)
             "out_addr": In(ceil_log2(num_results)),
             "out_data": Out(signed(out_width)),
+            "out_data4": Out(32),
         }
 
         super().__init__(ports)
@@ -133,6 +134,10 @@ class Epilogue(Component):
 
         # Readback - always active
         m.d.comb += self.out_data.eq(results[self.out_addr])
+        # Packed readback: four consecutive results (index aligned to 4).
+        base4 = self.out_addr & ~3
+        m.d.comb += self.out_data4.eq(Cat(
+            results[base4], results[base4 + 1], results[base4 + 2], results[base4 + 3]))
 
         return m
 

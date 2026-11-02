@@ -211,6 +211,7 @@ class Top(Cfu):
         m.d.comb += [
             seq.first.eq(i_cs.seq_first),
             seq.last.eq(i_cs.seq_last),
+            seq.keep_wgt.eq(i_cs.seq_keep_wgt),
             seq.k_count.eq(i_cs.seq_k_count),
             seq.start.eq(i_cs.seq_start),
         ]
@@ -282,6 +283,7 @@ class Top(Cfu):
         m.d.comb += [
             epi.out_addr.eq(i_rr.out_addr),
             i_rr.out_data.eq(epi.out_data),
+            i_rr.out_data4.eq(epi.out_data4),
         ]
 
         return m

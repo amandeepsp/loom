@@ -8,6 +8,7 @@ class ComputeStartInstruction(Instruction):
 
     seq_first: Out(1)
     seq_last: Out(1)
+    seq_keep_wgt: Out(1)
     seq_k_count: Out(10)
     seq_start: Out(1)
 
@@ -18,6 +19,9 @@ class ComputeStartInstruction(Instruction):
             m.d.sync += [
                 self.seq_first.eq(self.in0[0]),
                 self.seq_last.eq(self.in0[1]),
+                # Keep the weight bank (no swap): consecutive M tiles of one
+                # N tile reuse the weights already in the compute bank.
+                self.seq_keep_wgt.eq(self.in0[2]),
                 self.seq_k_count.eq(self.in1),
             ]
 
@@ -88,16 +92,25 @@ class ConfigInstruction(Instruction):
 
 
 class ReadResultInstruction(Instruction):
-    """funct3=4: Single-cycle — read INT8 result from epilogue store."""
+    """funct3=4: Single-cycle — read results from the epilogue store.
+
+    funct7=0: one INT8 result (sign-extended) at index in0.
+    funct7=1: four INT8 results at indices in0..in0+3 (in0 a multiple of 4),
+              packed little-endian into one 32-bit word.
+    """
 
     out_addr: Out(32)
     out_data: In(signed(8))
+    out_data4: In(32)
 
     def elaborate(self, platform):
         m = super().elaborate(platform)
 
         m.d.comb += self.out_addr.eq(self.in0)
-        m.d.comb += self.output.eq(self.out_data)
+        with m.If(self.funct7 == 1):
+            m.d.comb += self.output.eq(self.out_data4)
+        with m.Else():
+            m.d.comb += self.output.eq(self.out_data)
 
         self.signal_done(m)
         return m

@@ -392,3 +392,51 @@ class TestIntegration:
         sim.add_testbench(testbench)
         with sim.write_vcd("waves/test_e2e_like.vcd"):
             sim.run()
+
+
+class TestBatchA:
+    """Packed READ_RESULT (funct7=1) and keep_wgt (compute flag bit 2)."""
+
+    def test_packed_read_and_weight_reuse(self):
+        ROWS, COLS, K = 4, 4, 2
+        rng = np.random.default_rng(1)
+        A1 = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        A2 = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+
+        def expected(A):
+            C = A.astype(np.int32) @ B.astype(np.int32)
+            return [ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127)
+                    for r in range(ROWS) for c in range(COLS)]
+
+        act = lambda A: [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        dut = Top(TopConfig(rows=4, cols=4))
+
+        async def testbench(ctx):
+            n = ROWS * COLS
+            await write_per_channel_params(ctx, dut, [0] * n, [0x7FFFFFFF] * n, [0] * n)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            # Tile 1: fill both banks, swap both.
+            await dma_fill(ctx, dut.dma_act, act(A1))
+            await dma_fill(ctx, dut.dma_wgt, wgt)
+            await run_tile(ctx, dut, k=K, first=True, last=True)
+            exp = expected(A1)
+            for base in range(0, n, 4):
+                word = await cfu_op(ctx, dut, funct3=4, funct7=1, in0=base, in1=0)
+                got = [to_signed8((word >> (8 * i)) & 0xFF) for i in range(4)]
+                assert got == exp[base:base + 4], (base, got, exp[base:base + 4])
+            # Tile 2: new activations only; keep_wgt reuses the weight bank.
+            await dma_fill(ctx, dut.dma_act, act(A2))
+            await cfu_op(ctx, dut, funct3=0, funct7=0, in0=0b111, in1=K)
+            await cfu_op(ctx, dut, funct3=1, funct7=0, in0=0, in1=0)
+            exp2 = expected(A2)
+            for i in range(n):
+                got = to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0))
+                assert got == exp2[i], (i, got, exp2[i])
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()

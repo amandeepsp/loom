@@ -292,7 +292,12 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
             weight = weight[t_idx * layer.n + c_idx]
         pin = buffers[k["packed_input_buffer"]]
         out = buffers[k["output_buffer"]]
-        packed = np.frombuffer(transport.read_mem(pin["addr"], pin["size"]), np.int8)
+        cpu_kernel = k.get("kind", "").endswith("_cpu")
+        want = host_pack(layer, prev_out, tile, pm)
+        # CPU kernels read their source directly (no packed buffer): check
+        # their output against the host model of the whole layer instead.
+        packed = want if cpu_kernel else np.frombuffer(
+            transport.read_mem(pin["addr"], pin["size"]), np.int8)
         actual = np.frombuffer(transport.read_mem(out["addr"], out["size"]), np.int8).reshape(pm, n)
         a = packed.reshape(pm // tile, kk, tile).transpose(0, 2, 1).reshape(pm, kk)
         acc = a.astype(np.int64) @ weight.astype(np.int64)
@@ -300,7 +305,6 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
                                   layer.output_zero_point, layer.activation_min,
                                   layer.activation_max)
         errors[k["name"]] = int((actual[:m] != expected[:m]).sum())
-        want = host_pack(layer, prev_out, tile, pm)
         got = packed.reshape(pm // tile, kk, tile)
         want3 = want.reshape(pm // tile, kk, tile)
         # Only real rows are defined for the 2-D pack; conv packs define all.

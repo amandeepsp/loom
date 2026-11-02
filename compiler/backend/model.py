@@ -43,7 +43,7 @@ from compiler.dialects.loom import (
 from compiler.dialects.loom_cpu import Pack2DToTilesOp, PackConv2DToTilesOp
 from shared.layout import align_up, pack_weight_rows
 
-from .cpu import emit_lut_map, emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
+from .cpu import compile_c_kernel, emit_lut_map, emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
 from .riscv_ir import RiscvLoweringContext, lower_affine_kernel_to_riscv_scf
 from .riscv_ir_encode import encode_riscv_module
 from .target import CsrMap, GemmTargetSpec
@@ -367,6 +367,20 @@ def block_diagonal_taps(layer, tile: int = 8) -> int | None:
     return taps
 
 
+def block_diagonal_2d_taps(layer) -> int | None:
+    """Taps if a 2-D-packed layer (no conv packing) is block-diagonal, tap-major.
+
+    E.g. global average pooling: K = taps * C, weight nonzero only where
+    k % C == column. Such layers run as a small direct CPU kernel.
+    """
+    if getattr(layer, "packing", None) is not None or layer.k % layer.n or layer.k == layer.n:
+        return None
+    kk_channel = np.arange(layer.k)[:, None] % layer.n
+    if np.any(np.asarray(layer.weight)[kk_channel != np.arange(layer.n)[None, :]]):
+        return None
+    return layer.k // layer.n
+
+
 def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
     """[taps * tile, C] stacked diagonal blocks in channel-major K order."""
     channels = layer.n
@@ -553,6 +567,7 @@ def _compile_quantized_mobilenet(
         )
         pack_name = _buffer_name(index, "pack_input")
         taps = block_diagonal_taps(layer, tile)
+        cpu_taps = block_diagonal_2d_taps(layer)
         if layer.packing is None:
             pack_op = Pack2DToTilesOp(
                 pack_name,
@@ -607,16 +622,24 @@ def _compile_quantized_mobilenet(
                 nchw=packing.nchw,
             )
             pack_code = emit_pack_conv2d_to_tiles_op(pack_op)
-        loom_ops.append(pack_op)
-        functions.append(RiscvFunction(pack_name, pack_code))
+        if cpu_taps is None:
+            loom_ops.append(pack_op)
+            functions.append(RiscvFunction(pack_name, pack_code))
 
         gemm_k = layer.k if taps is None else taps * tile
-        gemm_weight = layer.weight if taps is None else block_diagonal_weight(layer, taps, tile)
+        if cpu_taps is not None:
+            # [taps][C]: the diagonal of each tap block, for the CPU kernel.
+            w = np.asarray(layer.weight, dtype=np.int8)
+            t_idx, c_idx = np.meshgrid(np.arange(cpu_taps), np.arange(layer.n), indexing="ij")
+            weight_data = np.ascontiguousarray(w[t_idx * layer.n + c_idx, c_idx]).tobytes()
+        else:
+            gemm_weight = layer.weight if taps is None else block_diagonal_weight(layer, taps, tile)
+            weight_data = pack_weight_rows(gemm_weight, tile)
         weight_buffer = planner.add(
             _buffer_name(index, "weights"),
             0,
             "constant.weights",
-            pack_weight_rows(gemm_weight, tile),
+            weight_data,
         )
         weight_buffer = _replace_size(planner, weight_buffer, len(weight_buffer.data))
         output = planner.add(
@@ -642,6 +665,25 @@ def _compile_quantized_mobilenet(
             "constant.shift",
             layer.shift.astype("<i4", copy=False).tobytes(),
         )
+        if cpu_taps is not None:
+            code = compile_c_kernel(layer.name, "blockdiag.c", {
+                "SRC_ADDR": source.addr, "DST_ADDR": output.addr,
+                "WGT_ADDR": weight_buffer.addr, "BIAS_ADDR": bias_buffer.addr,
+                "MULT_ADDR": multiplier_buffer.addr, "SHIFT_ADDR": shift_buffer.addr,
+                "LUT_ADDR": transform_addr, "M": layer.m, "C": layer.n, "TAPS": cpu_taps,
+                "OUT_ZP": layer.output_zero_point,
+                "ACT_MIN": layer.activation_min, "ACT_MAX": layer.activation_max,
+            })
+            functions.append(RiscvFunction(layer.name, code, ""))
+            kernels.append(GemmKernel(
+                name=layer.name, m=layer.m, k=layer.k, n=layer.n, padded_m=padded_m,
+                tile=tile, input_buffer=source.name, packed_input_buffer=packed_input.name,
+                output_buffer=output.name, riscv_code=code, riscv_asm="",
+                requires_repack_from=source.name if index else None,
+                kind=layer.kind + "_cpu",
+            ))
+            source = output
+            continue
         gemm_op = GemmOp(
             layer.name,
             m=layer.m,
@@ -1162,7 +1204,9 @@ def _functions_from_rewritten_loom(
 def _validate_executable_model(compiled: CompiledModel) -> None:
     expected_functions = []
     for index, kernel in enumerate(compiled.kernels):
-        expected_functions.extend((_buffer_name(index, "pack_input"), kernel.name))
+        if not kernel.kind.endswith("_cpu"):  # CPU kernels read their input directly
+            expected_functions.append(_buffer_name(index, "pack_input"))
+        expected_functions.append(kernel.name)
     names = [fn.name for fn in compiled.functions]
     # Optional "<gemmN>.lut_map" pre-pass must directly precede "<gemmN>.pack_input".
     for i, name in enumerate(names):

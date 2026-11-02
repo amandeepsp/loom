@@ -19,6 +19,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LLVM_PROJECT_BIN = REPO_ROOT.parent / "llvm-project" / "build" / "bin"
 
 
+KERNEL_DIR = Path(__file__).resolve().parent / "kernels"
+
+
+def compile_c_kernel(name: str, source: str, defines: dict[str, int]) -> bytes:
+    """Compile a per-layer C kernel (compiler/backend/kernels) to raw RV32IM .text.
+
+    `defines` become -D constants (addresses, shapes, quant params), so each
+    layer gets a specialized function. The entry point must be the only
+    non-inline function; this fails loudly if the object needs relocations
+    or any data section, because the runtime jumps to raw .text.
+    """
+    clang = shutil.which("clang")
+    if clang is None:
+        raise RuntimeError("clang with the riscv32 target is required for C kernels")
+    objcopy = _find_tool("llvm-objcopy", prefer_project=False)
+    readobj = _find_tool("llvm-readobj", prefer_project=False)
+    with tempfile.TemporaryDirectory(prefix="loom-ckernel-", dir="/tmp") as tmp:
+        obj = Path(tmp) / f"{name}.o"
+        text = Path(tmp) / f"{name}.text"
+        cmd = [
+            clang, "--target=riscv32", "-march=rv32im", "-mabi=ilp32", "-O2", "-mno-relax",
+            "-ffreestanding", "-fno-builtin", "-fno-jump-tables", "-fno-pic",
+            "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
+            *[f"-D{k}={v}" for k, v in defines.items()],
+            "-c", str(KERNEL_DIR / source), "-o", str(obj),
+        ]
+        _run([str(c) for c in cmd])
+        info = _run_output([str(readobj), "--relocations", "--sections", str(obj)])
+        if ".rela.text" in info:
+            raise RuntimeError(f"C kernel {name} needs relocations:\n{info}")
+        for section in (".rodata", ".data", ".sdata", ".bss", ".sbss"):
+            if f"Name: {section}" in info:
+                raise RuntimeError(f"C kernel {name} uses {section}; kernels must be pure .text")
+        _run([str(objcopy), "-O", "binary", "-j", ".text", str(obj), str(text)])
+        return text.read_bytes()
+
+
 def emit_lut_map(name: str, *, src_addr: int, dst_addr: int, n_bytes: int, lut_addr: int) -> bytes:
     """RV32I code for dst[i] = lut[src[i] + 128], one 32-bit word at a time."""
 

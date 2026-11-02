@@ -98,6 +98,9 @@ class ModelBinaryRuntime:
         self.model_blob = artifact.blob
         self.model_addr = artifact.model_addr if model_addr is None else model_addr
         self._validate_model_range(self.model_addr, len(self.model_blob))
+        # Firmware only reads the blob (constants are copied out of it), so one
+        # upload serves every later run on the same transport.
+        self._model_uploaded = False
 
     def run_quantized(self, input_matrix: np.ndarray) -> ModelRunResult:
         contract = _dict_field(self.artifact.manifest, "runtime_contract")
@@ -127,7 +130,9 @@ class ModelBinaryRuntime:
             )
 
         self.transport.write_mem(input_buf.addr, input_bytes)
-        self.transport.write_mem(self.model_addr, self.model_blob)
+        if not self._model_uploaded:
+            self.transport.write_mem(self.model_addr, self.model_blob)
+            self._model_uploaded = True
         cycles = self.transport.exec_model(self.model_addr, len(self.model_blob))
         output_bytes = self.transport.read_mem(output_buf.addr, output_buf.size)
         output = np.frombuffer(output_bytes, dtype=np.int8).reshape(padded_shape)

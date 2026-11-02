@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 from compiler import SerialTransport, TcpTransport
+from shared.protocol import DEFAULT_BAUD
 
 from tests.mnist_model_binary import DEFAULT_ONNX, run_mnist_model_binary
 
@@ -18,10 +19,10 @@ def main() -> int:
         description="Compile ONNX to a loom model binary and run it on hardware or sim.",
     )
     parser.add_argument("--port", default="/dev/ttyUSB1")
-    parser.add_argument("--baud-rate", type=int, default=115200)
+    parser.add_argument("--baud-rate", type=int, default=DEFAULT_BAUD)
     parser.add_argument("--onnx", default=str(DEFAULT_ONNX))
     parser.add_argument("--csr-json", default=str(REPO_ROOT / "build/sipeed_tang_nano_20k/csr.json"))
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--image", type=int, default=0, help="MNIST test-split index")
     parser.add_argument("--tolerance", type=int, default=2)
     parser.add_argument("--model-addr", type=lambda text: int(text, 0), default=None)
     args = parser.parse_args()
@@ -41,18 +42,18 @@ def main() -> int:
             transport,
             onnx_path=Path(args.onnx),
             csr_json=Path(args.csr_json),
-            seed=args.seed,
+            image=args.image,
             model_addr=args.model_addr,
         )
     finally:
         transport.close()
 
     print(f"model: addr=0x{result.model_addr:x} bytes={result.model_len} cycles={result.cycles}")
-    print(f"cpu output: {result.cpu_output.flatten().tolist()}")
+    print(f"onnx output: {result.cpu_output.flatten().tolist()}  (label {result.label})")
     print(f"{target_label} output:  {result.loom_output.flatten().tolist()}")
     print(f"hidden max delta: {result.hidden_max_delta}")
     print(f"output max delta: {result.output_max_delta}")
-    print(f"prediction: cpu={result.cpu_pred} {target_label}={result.loom_pred}")
+    print(f"prediction: onnx={result.cpu_pred} {target_label}={result.loom_pred} label={result.label}")
 
     if result.hidden_max_delta > args.tolerance:
         raise AssertionError(

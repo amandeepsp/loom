@@ -12,9 +12,10 @@ functions in the same model binary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -131,6 +132,7 @@ class CompiledModel:
     riscv_module: ModuleOp
     runtime_input: RuntimeTensor | None = None
     runtime_output: RuntimeTensor | None = None
+    source: dict | None = None
 
     def recommended_model_addr(self, *, alignment: int = 32) -> int:
         """Return a non-overlapping runtime RAM address for this model blob."""
@@ -211,6 +213,7 @@ class CompiledModel:
                 }
                 for fn in self.functions
             ],
+            **({"source": self.source} if self.source else {}),
         }
 
     def to_bytes(self, *, include_debug_sections: bool = True) -> bytes:
@@ -321,6 +324,34 @@ def compile_onnx_model(
 ) -> CompiledModel:
     """Load ONNX, emit xDSL TOSA, then compile supported GEMM regions."""
 
+    compiled = _compile_onnx_model(
+        path,
+        batch_size=batch_size,
+        memory_base=memory_base,
+        tile=tile,
+        cfu_word_bits=cfu_word_bits,
+        cfu_store_depth_words=cfu_store_depth_words,
+        csr_json=csr_json,
+    )
+    # Record provenance so runners can recompute fresh references from the ONNX.
+    onnx_path = Path(path).resolve()
+    source = {
+        "onnx": str(onnx_path),
+        "onnx_sha256": hashlib.sha256(onnx_path.read_bytes()).hexdigest(),
+    }
+    return replace(compiled, source=source)
+
+
+def _compile_onnx_model(
+    path: str,
+    *,
+    batch_size: int,
+    memory_base: int,
+    tile: int,
+    cfu_word_bits: int,
+    cfu_store_depth_words: int,
+    csr_json: str | Path | None,
+) -> CompiledModel:
     if is_qlinear_mobilenet(path):
         return _compile_quantized_mobilenet(
             parse_qlinear_mobilenet(path),
@@ -1092,6 +1123,12 @@ def _lower_gemm_candidate(candidate: GemmCandidateOp, *, batch_size: int) -> _Lo
     shift = _const_array(candidate.shift, np.int32).reshape(-1)
     multiplier = _broadcast_param(multiplier, n, f"{name}: multiplier")
     shift = _broadcast_param(shift, n, f"{name}: shift")
+    # TOSA's scale32 shift counts the multiplier's 31 fractional bits. Loom's
+    # epilogue does that high-multiply (SRDHM) first, so RDBPOT only gets the
+    # residual right shift. Same conversion as the MobileNet frontend.
+    shift = shift - 31
+    if np.any(shift < 0):
+        raise ValueError(f"{name}: requantization scales >= 1 are unsupported")
 
     input_zp = int(_const_scalar(candidate.input_zp))
     if input_zp != 0:

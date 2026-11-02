@@ -45,7 +45,9 @@ def test_compile_mobilenet_emits_llvm_cpu_packers_and_cfu_gemms():
     fused = [k for k in compiled.kernels if k.packed_by]
     assert len(fused) == 13
     assert len(names) - len(lut_maps) == 58 - 1 - len(fused)
-    assert len(lut_maps) == 13
+    # The LUT is applied in the producer GEMM's store (row-major), not a pre-pass.
+    assert len(lut_maps) == 0
+    assert sum(1 for k in compiled.kernels if k.input_mapped_by) == 13
     assert all(function.code and len(function.code) % 4 == 0 for function in compiled.functions)
     ops = tuple(compiled.loom_module.body.block.ops)
     assert len(ops) == 58 - 2 - 13  # pool: no loom pack/GEMM ops; fused: no pack ops

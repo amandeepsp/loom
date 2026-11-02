@@ -105,6 +105,9 @@ class GemmKernel:
     # Name of the kernel whose result store writes this kernel's packed input
     # directly (fused pack); such kernels have no separate pack function.
     packed_by: str | None = None
+    # Name of the kernel whose result store writes this kernel's input already
+    # mapped through its requant LUT (no lut_map pre-pass).
+    input_mapped_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,7 @@ class CompiledModel:
                     "requires_repack_from": k.requires_repack_from,
                     "kind": k.kind,
                     "packed_by": k.packed_by,
+                    "input_mapped_by": k.input_mapped_by,
                 }
                 for k in self.kernels
             ],
@@ -550,6 +554,7 @@ def _compile_quantized_mobilenet(
     riscv_ir_ops = []
 
     fused_packs: dict[int, Buffer] = {}  # layer index -> packed buffer its producer fills
+    mapped_inputs: dict[int, Buffer] = {}  # layer index -> LUT-mapped input its producer fills
     for index, layer in enumerate(plan.layers):
         transform_addr = 0
         if layer.input_transform is not None:
@@ -573,6 +578,7 @@ def _compile_quantized_mobilenet(
         )
         pack_name = _buffer_name(index, "pack_input")
         taps = block_diagonal_taps(layer, tile)
+        premapped = mapped_inputs.pop(index, None)
         cpu_taps = block_diagonal_2d_taps(layer)
         if layer.packing is None:
             pack_op = Pack2DToTilesOp(
@@ -592,7 +598,11 @@ def _compile_quantized_mobilenet(
             pack_src_addr = source.addr
             pack_transform_addr = transform_addr
             lut_bytes = packing.input_h * packing.input_w * packing.channels
-            if (transform_addr and packing.kernel_h * packing.kernel_w > 1
+            if premapped is not None:
+                # F3: the producer stored this input already LUT-mapped.
+                pack_src_addr = premapped.addr
+                pack_transform_addr = 0
+            elif (transform_addr and packing.kernel_h * packing.kernel_w > 1
                     and not packing.nchw and lut_bytes % 4 == 0):
                 # Each source byte feeds up to kernel_h*kernel_w taps; apply
                 # the requant LUT once into a scratch copy, pack without it.
@@ -731,6 +741,23 @@ def _compile_quantized_mobilenet(
             store_lut = planner.add(_buffer_name(index + 1, "store_lut"), len(rebased),
                                     "constant.requant_lut", rebased.astype(np.int8).tobytes())
             fused_addr, fused_lut_addr = fused.addr, store_lut.addr
+        output_addr = output.addr
+        if (not fused_addr and nxt is not None and nxt.packing is not None
+                and not nxt.packing.nchw and nxt.input_transform is not None
+                and nxt.packing.kernel_h * nxt.packing.kernel_w > 1
+                and nxt.packing.input_h * nxt.packing.input_w == layer.m
+                and nxt.packing.channels == layer.n):
+            # F3: store LUT-mapped results row-major into the next layer's
+            # pack source, replacing its separate lut_map pass.
+            mapped = planner.add(_buffer_name(index + 1, "input_lut_mapped"),
+                                 padded_m * layer.n, "activation")
+            mapped_inputs[index + 1] = mapped
+            lut = np.asarray(nxt.input_transform, dtype=np.int8)
+            offsets = np.arange(-128, 256)
+            rebased = lut[np.where(offsets < 128, offsets, offsets - 256) + 128]
+            store_lut = planner.add(_buffer_name(index + 1, "store_lut"), len(rebased),
+                                    "constant.requant_lut", rebased.astype(np.int8).tobytes())
+            output_addr, fused_lut_addr = mapped.addr, store_lut.addr
         target_spec = GemmTargetSpec(
             packed_output_addr=fused_addr,
             store_lut_addr=fused_lut_addr,
@@ -740,7 +767,7 @@ def _compile_quantized_mobilenet(
             tile=tile,
             input_addr=packed_input.addr,
             weight_addr=weight_buffer.addr,
-            output_addr=output.addr,
+            output_addr=output_addr,
             bias_addr=bias_buffer.addr,
             mult_addr=multiplier_buffer.addr,
             shift_addr=shift_buffer.addr,
@@ -776,6 +803,7 @@ def _compile_quantized_mobilenet(
                 requires_repack_from=source.name if index else None,
                 kind=layer.kind,
                 packed_by=plan.layers[index - 1].name if prepacked is not None else None,
+                input_mapped_by=plan.layers[index - 1].name if premapped is not None else None,
             )
         )
         source = output

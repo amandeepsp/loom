@@ -209,6 +209,11 @@ def _store_result_row(
     zero = rv32.LiOp(0)
     index_ops, index_base = _tile_channel(ctx.spec, row_iv, zero.rd)
     out: list[Operation] = [m_row, *row_offset_ops, col0, base, row_ptr, zero, *index_ops]
+    lut = None
+    if ctx.spec.store_lut_addr:
+        # Row-major store through the consumer's requant LUT (rebased table).
+        lut = rv32.LiOp(ctx.spec.store_lut_addr + 128)
+        out.append(lut)
     for col in range(n_count):
         if col == 0:
             index = index_base
@@ -217,7 +222,14 @@ def _store_result_row(
             out.append(step)
             index = step.rd
         read = loom_riscv.ReadResultOp(index)
-        out.extend([read, riscv.SbOp(row_ptr.rd, read.rd, col)])
+        value = read.rd
+        out.append(read)
+        if lut is not None:
+            addr = riscv.AddOp(lut.rd, read.rd)
+            mapped = riscv.LbuOp(addr.rd, 0)
+            out += [addr, mapped]
+            value = mapped.rd
+        out.append(riscv.SbOp(row_ptr.rd, value, col))
     return out
 
 

@@ -290,7 +290,8 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
     from compiler.backend.model import block_diagonal_taps
 
     kernels = artifact.manifest["kernels"]
-    fused_producers = {k["packed_by"] for k in kernels if k.get("packed_by")}
+    fused_producers = ({k["packed_by"] for k in kernels if k.get("packed_by")}
+                       | {k["input_mapped_by"] for k in kernels if k.get("input_mapped_by")})
     for layer, k in zip(plan.layers, kernels):
         tile, m, n, pm = k["tile"], k["m"], k["n"], k["padded_m"]
         kk = layer.k  # packed rows per M tile (full K, even for K-sliced GEMMs)

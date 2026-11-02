@@ -224,6 +224,15 @@ def pack_conv2d_to_tiles_module(
 
     if tile <= 0 or not _is_power_of_two(tile):
         raise ValueError("tile must be a positive power of two")
+    if tile == 8:
+        return _pack_conv2d_rowwords_module(
+            src_addr=src_addr, dst_addr=dst_addr, transform_addr=transform_addr,
+            input_h=input_h, input_w=input_w, channels=channels,
+            output_h=output_h, output_w=output_w, kernel_h=kernel_h, kernel_w=kernel_w,
+            stride_h=stride_h, stride_w=stride_w, pad_top=pad_top, pad_left=pad_left,
+            input_zero_point=input_zero_point, tile=tile, nchw=nchw,
+            channel_major=channel_major,
+        )
     if channel_major:
         return _pack_conv2d_channel_major_module(
             src_addr=src_addr, dst_addr=dst_addr, transform_addr=transform_addr,
@@ -538,6 +547,185 @@ def _pack_conv2d_channel_major_module(
     pack_func.body.block.add_ops(
         [src_i, src0, dst_i, dst0, transform_i, transform0, c0, c1, *consts.values(),
          zero_point, c128, m_loop, func.ReturnOp()]
+    )
+    return ModuleOp([pack_func])
+
+
+def _pack_conv2d_rowwords_module(
+    *,
+    src_addr: int,
+    dst_addr: int,
+    transform_addr: int,
+    input_h: int,
+    input_w: int,
+    channels: int,
+    output_h: int,
+    output_w: int,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_top: int,
+    pad_left: int,
+    input_zero_point: int,
+    tile: int,
+    nchw: bool,
+    channel_major: bool,
+) -> ModuleOp:
+    """im2col that writes each (channel, tap) row group as two 32-bit words.
+
+    In loom's packed layout the `tile` rows of one K entry are contiguous
+    bytes, in both tap-major and channel-major K order. Loop m_tile -> tap
+    (unrolled) -> channel, with the 8 rows unrolled: gather 8 source bytes,
+    apply the optional requant LUT, select the zero point for padding, pack
+    into two words, and store with `sw`. The VexRiscv dcache is write-through,
+    so this cuts SDRAM write transactions 4x versus byte stores. Per (tap,
+    row) source offsets and in-bounds flags are computed once per m_tile.
+    """
+    assert tile == 8
+    taps = kernel_h * kernel_w
+    k_total = taps * channels
+    src_i = _i32_const(src_addr)
+    src0 = llvm.IntToPtrOp(src_i.result)
+    dst_i = _i32_const(dst_addr)
+    dst0 = llvm.IntToPtrOp(dst_i.result)
+    transform_i = _i32_const(transform_addr)
+    transform0 = llvm.IntToPtrOp(transform_i.result)
+    c0 = _index_const(0)
+    c1 = _index_const(1)
+    k = {
+        "m": _index_const(output_h * output_w),
+        "tile": _index_const(tile),
+        "ow": _index_const(output_w),
+        "ih": _index_const(input_h),
+        "iw": _index_const(input_w),
+        "c": _index_const(channels),
+        "sh": _index_const(stride_h),
+        "sw": _index_const(stride_w),
+        "pt": _index_const(pad_top),
+        "pl": _index_const(pad_left),
+        "dst_tile": _index_const(k_total * tile),
+        # K-entry stride between consecutive channels, in bytes.
+        "dst_c": _index_const((taps if channel_major else 1) * tile),
+        "src_c": _index_const(input_h * input_w if nchw else 1),
+    }
+    zero_point = _i8_const(input_zero_point)
+    c128 = _i32_const(128)
+    shifts = {r: _i32_const(8 * (r % 4)) for r in range(1, 8) if r % 4}
+
+    m_block = Block(arg_types=[IndexType()])
+    m_base = m_block.args[0]
+    m_ops: list = []
+
+    def emit(op):
+        m_ops.append(op)
+        return op
+
+    m_tile = emit(arith.DivUIOp(m_base, k["tile"].result))
+    dst_mt = emit(arith.MuliOp(m_tile.result, k["dst_tile"].result))
+    # Per row: output pixel -> input origin; shared by all taps.
+    rows = []
+    for r in range(tile):
+        out_index = emit(arith.AddiOp(m_base, _emit_index(emit, r)))
+        row_ok = emit(arith.CmpiOp(out_index.result, k["m"].result, "ult"))
+        oh = emit(arith.DivUIOp(out_index.result, k["ow"].result))
+        ow = emit(arith.RemUIOp(out_index.result, k["ow"].result))
+        ih_b = emit(arith.SubiOp(emit(arith.MuliOp(oh.result, k["sh"].result)).result, k["pt"].result))
+        iw_b = emit(arith.SubiOp(emit(arith.MuliOp(ow.result, k["sw"].result)).result, k["pl"].result))
+        rows.append((row_ok, ih_b, iw_b))
+
+    # Tap loops (ky, kx) are real loops so the function stays well under the
+    # 4 KiB direct-mapped icache; only the 8 rows are unrolled.
+    kx_block = Block(arg_types=[IndexType()])
+    ky_block = Block(arg_types=[IndexType()])
+    ky, kx = ky_block.args[0], kx_block.args[0]
+    tap_ops: list = []
+
+    def temit(op):
+        tap_ops.append(op)
+        return op
+
+    row_src, row_ok = [], []
+    for ok_row, ih_b, iw_b in rows:
+        ih = temit(arith.AddiOp(ih_b.result, ky))
+        iw = temit(arith.AddiOp(iw_b.result, kx))
+        ok = temit(arith.AndIOp(
+            ok_row.result,
+            temit(arith.AndIOp(
+                temit(arith.CmpiOp(ih.result, k["ih"].result, "ult")).result,
+                temit(arith.CmpiOp(iw.result, k["iw"].result, "ult")).result,
+            )).result,
+        ))
+        pix = temit(arith.AddiOp(temit(arith.MuliOp(ih.result, k["iw"].result)).result, iw.result))
+        base = pix if nchw else temit(arith.MuliOp(pix.result, k["c"].result))
+        row_src.append(base)
+        row_ok.append(ok)
+    kw_const = temit(_index_const(kernel_w))
+    tap = temit(arith.AddiOp(temit(arith.MuliOp(ky, kw_const.result)).result, kx))
+    kk_scale = temit(_index_const((1 if channel_major else channels) * tile))
+    dst_tap = temit(arith.AddiOp(dst_mt.result, temit(arith.MuliOp(tap.result, kk_scale.result)).result))
+
+    ch_block = Block(arg_types=[IndexType()])
+    channel = ch_block.args[0]
+    ops: list = []
+    src_c = arith.MuliOp(channel, k["src_c"].result)
+    dst_c0 = arith.MuliOp(channel, k["dst_c"].result)
+    dst_c = arith.AddiOp(dst_tap.result, dst_c0.result)
+    dst_c32 = arith.IndexCastOp(dst_c.result, i32)
+    ops += [src_c, dst_c0, dst_c, dst_c32]
+    words = [None, None]
+    for r in range(tile):
+        lin = arith.AddiOp(row_src[r].result, src_c.result)
+        off = arith.IndexCastOp(lin.result, i32)
+        ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+        val = llvm.LoadOp(ptr.result, i8)
+        ops += [lin, off, ptr, val]
+        v = val.results[0]
+        if transform_addr:
+            ext = arith.ExtSIOp(v, i32)
+            idx = arith.AddiOp(ext.result, c128.result)
+            lptr = llvm.GEPOp(transform0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[idx.result])
+            mapped = llvm.LoadOp(lptr.result, i8)
+            ops += [ext, idx, lptr, mapped]
+            v = mapped.results[0]
+        chosen = arith.SelectOp(row_ok[r].result, v, zero_point.result)
+        wide = arith.ExtUIOp(chosen.result, i32)
+        ops += [chosen, wide]
+        part = wide.result
+        if r % 4:
+            sh = arith.ShLIOp(part, shifts[r].result)
+            ops.append(sh)
+            part = sh.result
+        w = r // 4
+        if words[w] is None:
+            words[w] = part
+        else:
+            acc = arith.OrIOp(words[w], part)
+            ops.append(acc)
+            words[w] = acc.result
+    for w in range(2):
+        if w:
+            off = arith.AddiOp(dst_c32.result, _i32_const_op(ops, 4).result)
+            ops.append(off)
+        else:
+            off = dst_c32
+        ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+        ops += [ptr, llvm.StoreOp(words[w], ptr.result, alignment=4)]
+    ch_block.add_ops([*ops, scf.YieldOp()])
+    ch_loop = scf.ForOp(c0.result, k["c"].result, c1.result, [], Region(ch_block))
+    kx_block.add_ops([*tap_ops, ch_loop, scf.YieldOp()])
+    kh_const = emit(_index_const(kernel_h))
+    kwl_const = emit(_index_const(kernel_w))
+    kx_loop = scf.ForOp(c0.result, kwl_const.result, c1.result, [], Region(kx_block))
+    ky_block.add_ops([kx_loop, scf.YieldOp()])
+    tap_loops = [scf.ForOp(c0.result, kh_const.result, c1.result, [], Region(ky_block))]
+
+    m_block.add_ops([*m_ops, *tap_loops, scf.YieldOp()])
+    m_loop = scf.ForOp(c0.result, k["m"].result, k["tile"].result, [], Region(m_block))
+    pack_func = func.FuncOp("loom_pack_conv2d_to_tiles", ([], []))
+    pack_func.body.block.add_ops(
+        [src_i, src0, dst_i, dst0, transform_i, transform0, c0, c1, *k.values(),
+         zero_point, c128, *shifts.values(), m_loop, func.ReturnOp()]
     )
     return ModuleOp([pack_func])
 

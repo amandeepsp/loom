@@ -160,6 +160,11 @@ def main() -> int:
         if args.reset_command:
             print(f"[upload-once] Running reset command: {args.reset_command}")
             subprocess.run(args.reset_command, shell=True, check=True)
+            # openFPGALoader shares the FT2232 with this UART and resets the
+            # chip, which drops the line rate back to its default (115200).
+            # Re-apply the configured baud so non-default rates keep working.
+            port.baudrate = 9600 if args.speed != 9600 else 19200
+            port.baudrate = args.speed
             time.sleep(0.5)
             port.reset_input_buffer()
             port.reset_output_buffer()

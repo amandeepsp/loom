@@ -13,6 +13,7 @@ pub const OpType = enum(u8) {
     exec_model = 0x13,
     perf = 0x14,
     checksum = 0x15,
+    profile = 0x16,
     _,
 };
 

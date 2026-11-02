@@ -132,10 +132,7 @@ class ModelBinaryRuntime:
 
         self.transport.write_mem(input_buf.addr, input_bytes)
         if not self._model_uploaded:
-            self.uploaded_bytes = 0
-            if not self.model_resident():
-                self.transport.write_mem(self.model_addr, self.model_blob)
-                self.uploaded_bytes = len(self.model_blob)
+            self.uploaded_bytes = self._upload_model()
             self._model_uploaded = True
         cycles = self.transport.exec_model(self.model_addr, len(self.model_blob))
         output_bytes = self.transport.read_mem(output_buf.addr, output_buf.size)
@@ -145,6 +142,32 @@ class ModelBinaryRuntime:
             cycles=cycles,
             model_addr=self.model_addr,
         )
+
+    UPLOAD_CHUNK = 16 * 1024
+
+    def _upload_model(self) -> int:
+        """Bring device memory in sync with the blob; return bytes sent.
+
+        Whole-blob CRC match -> nothing to send. Otherwise compare 16 KiB
+        chunks and send only those that differ, so recompiling a model whose
+        constants did not move (code/manifest live at the tail) costs seconds,
+        not a full 2 MiB serial upload.
+        """
+        if not self.model_resident():
+            checksum = getattr(self.transport, "checksum", None)
+            if checksum is None or self._checksum_unsupported:
+                self.transport.write_mem(self.model_addr, self.model_blob)
+                return len(self.model_blob)
+            sent = 0
+            for off in range(0, len(self.model_blob), self.UPLOAD_CHUNK):
+                piece = self.model_blob[off : off + self.UPLOAD_CHUNK]
+                if checksum(self.model_addr + off, len(piece)) != zlib.crc32(piece):
+                    self.transport.write_mem(self.model_addr + off, piece)
+                    sent += len(piece)
+            return sent
+        return 0
+
+    _checksum_unsupported = False
 
     def model_resident(self) -> bool:
         """True if device memory already holds this exact blob (CRC-32 match).
@@ -158,6 +181,7 @@ class ModelBinaryRuntime:
         try:
             resident = checksum(self.model_addr, len(self.model_blob))
         except Exception:  # older firmware answers unknown_op
+            self._checksum_unsupported = True
             return False
         return resident == zlib.crc32(self.model_blob)
 

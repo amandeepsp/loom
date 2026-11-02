@@ -20,6 +20,7 @@ OP_WRITE = 0x11
 OP_EXEC_MODEL = 0x13
 OP_PERF = 0x14
 OP_CHECKSUM = 0x15
+OP_PROFILE = 0x16
 
 STATUS_OK = 0x00
 WRITE_CHUNK_MAX = 1024
@@ -93,6 +94,8 @@ class FramingProtocol:
         return bytes(chunks)
 
 
+READ_CHUNK_MAX = 8192
+
 # Must match the SoC build (`--uart-baudrate`); override with LOOM_BAUD.
 DEFAULT_BAUD = int(os.environ.get("LOOM_BAUD", "115200"))
 
@@ -120,12 +123,20 @@ class BaseTransport:
 
     def read_mem(self, addr: int, length: int) -> bytes:
         out = bytearray()
-        chunk_max = 0xFFFF
+        # Long device->host bursts drop bytes on the Tang Nano's USB-UART
+        # bridge at 1 Mbaud (64 KiB reads fail, 16 KiB pass); keep reads small.
+        chunk_max = READ_CHUNK_MAX
         for offset in range(0, length, chunk_max):
             chunk_len = min(chunk_max, length - offset)
             payload = struct.pack("<II", addr + offset, chunk_len)
             out.extend(self._request(OP_READ, payload, expected_len=chunk_len))
         return bytes(out)
+
+    def profile(self) -> list[int]:
+        """Per-step cycles of the last exec_model: [constants, step0, step1, ...]."""
+        data = self._request(OP_PROFILE, b"")
+        (count,) = struct.unpack_from("<I", data)
+        return list(struct.unpack_from(f"<{count}I", data, 4))
 
     def checksum(self, addr: int, length: int) -> int:
         """CRC-32 of device memory (matches zlib.crc32)."""
@@ -185,6 +196,7 @@ class SerialTransport(BaseTransport):
 
     def _request(self, op: int, payload: bytes, *, expected_len: int | None = None) -> bytes:
         sid = self._next_seq()
+        self._port.reset_input_buffer()  # drop stale bytes from an aborted response
         self._proto.write_request(self._port, op, payload, sid)
         resp = self._proto.read_response(self._port)
         if resp.status != STATUS_OK:

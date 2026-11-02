@@ -12,6 +12,7 @@ pub fn dispatch(header: link.Header) void {
         .read => memory.readMem(header),
         .write => memory.writeMem(header),
         .checksum => checksum(header),
+        .profile => profileOp(header),
         .exec_model => execModel(header),
         .perf => perf(header),
         else => link.sendError(header.seq_id, .unknown_op, &.{}),
@@ -45,6 +46,20 @@ fn ping(header: link.Header) void {
     }
 
     link.sendOk(header.seq_id, &.{}, 0);
+}
+
+/// Response: u32 count, then `count` u32 cycle counts (see model.profile).
+fn profileOp(header: link.Header) void {
+    if (header.payload_len != 0) {
+        link.drainPayload(header.payload_len);
+        link.sendError(header.seq_id, .bad_payload_len, &.{});
+        return;
+    }
+    var buf: [4 + 4 * model.max_profile]u8 = undefined;
+    const n = model.profile_len;
+    std.mem.writeInt(u32, buf[0..4], n, .little);
+    for (0..n) |i| std.mem.writeInt(u32, buf[4 + 4 * i ..][0..4], model.profile[i], .little);
+    link.sendResponse(header.seq_id, .ok, buf[0 .. 4 + 4 * n], 0);
 }
 
 fn checksum(header: link.Header) void {

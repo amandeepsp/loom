@@ -1,5 +1,6 @@
 const std = @import("std");
 const link = @import("link.zig");
+const model = @import("model.zig");
 const protocol = @import("protocol");
 const uart = @import("uart.zig");
 
@@ -33,6 +34,7 @@ pub fn writeMem(header: link.Header) void {
         return;
     }
 
+    model.noteWrite(req_hdr.addr, data_len);
     var dst: [*]u8 = @ptrFromInt(req_hdr.addr);
 
     var offset: usize = 0;

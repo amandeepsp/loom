@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--tolerance", type=int, default=None,
                        help="fail if any logit differs from ONNX by more than this")
     p_run.add_argument("-o", "--output", help="write the last raw int8 output here")
+    p_run.add_argument("--profile", action="store_true",
+                       help="print per-step cycle breakdown of the last run")
     _add_link_args(p_run)
     p_run.set_defaults(fn=cmd_run)
 
@@ -178,6 +180,8 @@ def cmd_run(args) -> int:
             print("  ".join(parts))
             if args.output:
                 Path(args.output).write_bytes(out.astype(np.int8).tobytes())
+        if args.profile:
+            print_profile(artifact.manifest, transport.profile())
     finally:
         transport.close()
 
@@ -190,6 +194,25 @@ def cmd_run(args) -> int:
             summary.append(f"agrees with ONNX on {agree}/{n}")
         print("  ".join(summary))
     return 1 if failures else 0
+
+
+def profile_rows(manifest: dict, cycles: list[int]) -> list[tuple[str, int]]:
+    """Name each firmware profile entry: constants load, then schedule steps."""
+    names = ["(load constants)"] + [f["name"] for f in manifest.get("riscv_functions", [])]
+    return [(names[i] if i < len(names) else f"step{i}", c) for i, c in enumerate(cycles)]
+
+
+def print_profile(manifest: dict, cycles: list[int], top: int = 25) -> None:
+    rows = profile_rows(manifest, cycles)
+    total = sum(c for _, c in rows) or 1
+    print(f"\nprofile: {total:,} cycles ({total / 48e3:.1f} ms) over {len(rows)} steps")
+    for name, c in sorted(rows, key=lambda r: -r[1])[:top]:
+        print(f"  {c:>12,}  {100 * c / total:5.1f}%  {name}")
+    by_kind: dict[str, int] = {}
+    for name, c in rows:
+        kind = "pack" if "pack" in name else "load constants" if name.startswith("(") else "gemm"
+        by_kind[kind] = by_kind.get(kind, 0) + c
+    print("  by kind: " + ", ".join(f"{k} {100 * v / total:.1f}%" for k, v in by_kind.items()))
 
 
 def _reference_for(artifact, onnx_override: str | None):

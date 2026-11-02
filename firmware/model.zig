@@ -14,6 +14,38 @@ const sched_call_riscv: u8 = 1;
 
 pub var debug_buf: [8]u8 = @splat(0);
 
+/// Per-step mcycle counts from the last exec_model: [0] = constant loading,
+/// [1 + i] = schedule entry i (same order as the manifest's riscv_functions).
+pub const max_profile = 128;
+pub var profile: [max_profile]u32 = @splat(0);
+pub var profile_len: u32 = 0;
+
+/// Constants are read-only while a model runs, so they only need copying out
+/// of the blob once per model. `resident` remembers which blob was loaded and
+/// the address span its constants cover; any host write overlapping either
+/// (see `noteWrite`, called from memory.writeMem) forces a reload.
+const Resident = struct { addr: u32, len: u32, lo: u32, hi: u32 };
+var resident: ?Resident = null;
+
+pub fn noteWrite(addr: u32, len: u32) void {
+    const r = resident orelse return;
+    const end = addr +% len;
+    const hits_blob = addr < r.addr + r.len and end > r.addr;
+    const hits_consts = addr < r.hi and end > r.lo;
+    if (hits_blob or hits_consts) resident = null;
+}
+
+/// mcycle (low 32 bits); host-side unit tests have no RISC-V CSRs.
+fn now() u32 {
+    if (builtin.is_test) return 0;
+    return @truncate(cpu_csr.mcycle.read());
+}
+
+fn isResident(addr: u32, len: u32) bool {
+    const r = resident orelse return false;
+    return r.addr == addr and r.len == len;
+}
+
 pub const ExecError = error{
     BadMagic,
     BadPayloadLen,
@@ -54,10 +86,17 @@ pub fn execute(addr: u32, len: u32) ExecError!u32 {
     const schedule = sections.schedule orelse return error.BadPayloadLen;
 
     const cycle_start = cpu_csr.mcycle.read();
-    loadConstants(data, constants) catch |err| {
-        if (debug_buf[0] == 0) setDebug(2, 0, 0, constants.off);
-        return err;
-    };
+    profile_len = 0;
+    if (!isResident(addr, len)) {
+        resident = null;
+        const span = loadConstants(data, constants) catch |err| {
+            if (debug_buf[0] == 0) setDebug(2, 0, 0, constants.off);
+            return err;
+        };
+        resident = .{ .addr = addr, .len = len, .lo = span.lo, .hi = span.hi };
+    }
+    profile[0] = @truncate(cpu_csr.mcycle.read() -% cycle_start);
+    profile_len = 1;
     flushDataCaches();
     runSchedule(addr, data, riscv, schedule) catch |err| {
         if (debug_buf[0] == 0) setDebug(3, 0, 0, schedule.off);
@@ -115,11 +154,14 @@ fn parseSections(data: []const u8) ExecError!Sections {
     return sections;
 }
 
-fn loadConstants(data: []const u8, range: Range) ExecError!void {
+const Span = struct { lo: u32 = std.math.maxInt(u32), hi: u32 = 0 };
+
+fn loadConstants(data: []const u8, range: Range) ExecError!Span {
     const sec = try range.slice(data);
     if (sec.len < 4) return error.BadPayloadLen;
     const count = readU32(sec[0..4]);
     var cursor: u32 = 4;
+    var span: Span = .{};
     for (0..count) |_| {
         if (cursor + 12 > sec.len) return error.BadPayloadLen;
         const hdr = sec[cursor .. cursor + 12];
@@ -134,8 +176,11 @@ fn loadConstants(data: []const u8, range: Range) ExecError!void {
 
         const dst: [*]u8 = @ptrFromInt(dst_addr);
         std.mem.copyForwards(u8, dst[0..data_len], sec[cursor..end]);
+        span.lo = @min(span.lo, dst_addr);
+        span.hi = @max(span.hi, dst_addr + data_len);
         cursor = align4(end);
     }
+    return span;
 }
 
 fn runSchedule(model_addr: u32, data: []const u8, riscv_range: Range, schedule_range: Range) ExecError!void {
@@ -144,6 +189,11 @@ fn runSchedule(model_addr: u32, data: []const u8, riscv_range: Range, schedule_r
     const count = readU32(sec[0..4]);
     var cursor: u32 = 4;
     for (0..count) |_| {
+        const step_start = now();
+        defer if (profile_len < max_profile) {
+            profile[profile_len] = now() -% step_start;
+            profile_len += 1;
+        };
         if (cursor + 4 > sec.len) return error.BadPayloadLen;
         const op = sec[cursor];
         setDebug(3, op, @truncate(cursor), count);

@@ -222,11 +222,14 @@ class CompiledModel:
         constants = _pack_constant_section(b for b in self.buffers if b.is_constant)
         riscv_code = _pack_riscv_section(self.functions)
         schedule = _pack_schedule_section(self.functions)
+        # Largest, most stable section first: when only code or the manifest
+        # changes, the constant bytes keep their offsets, so a chunked
+        # checksum diff re-uploads just the tail (see ModelBinaryRuntime).
         sections = [
-            (SECTION_MANIFEST, manifest),
             (SECTION_CONSTANTS, constants),
             (SECTION_RISCV, riscv_code),
             (SECTION_SCHEDULE, schedule),
+            (SECTION_MANIFEST, manifest),
         ]
         if include_debug_sections:
             sections.extend(

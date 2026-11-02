@@ -93,6 +93,7 @@ class PackConv2DToTilesOp(IRDLOperation):
     input_zero_point = prop_def(IntegerAttr)
     tile = prop_def(IntegerAttr)
     nchw = prop_def(IntegerAttr)
+    channel_major = prop_def(IntegerAttr)
 
     traits = traits_def(Pure())
 
@@ -105,6 +106,7 @@ class PackConv2DToTilesOp(IRDLOperation):
         src_addr: int,
         dst_addr: int,
         transform_addr: int = 0,
+        channel_major: bool = False,
         input_h: int,
         input_w: int,
         channels: int,
@@ -142,6 +144,7 @@ class PackConv2DToTilesOp(IRDLOperation):
                 "input_zero_point": _i32(input_zero_point),
                 "tile": _i32(tile),
                 "nchw": _i32(int(nchw)),
+                "channel_major": _i32(int(channel_major)),
             }
         )
 

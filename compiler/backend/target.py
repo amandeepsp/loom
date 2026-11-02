@@ -66,6 +66,14 @@ class GemmTargetSpec:
     activation_max: int = 127
     cfu_word_bits: int = 64
     cfu_store_depth_words: int = 512
+    # Block-diagonal GEMMs: the packed input has `input_k_stride` K rows per
+    # M tile (default: k), and N tile n reads rows starting at n * input_n_k_offset.
+    input_k_stride: int = 0
+    input_n_k_offset: int = 0
+
+    @property
+    def a_k_stride(self) -> int:
+        return self.input_k_stride or self.k
 
     @property
     def k_tile(self) -> int:

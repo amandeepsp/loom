@@ -59,6 +59,7 @@ def emit_pack_conv2d_to_tiles_op(op: PackConv2DToTilesOp) -> bytes:
                 input_zero_point=int(op.input_zero_point.value.data),
                 tile=int(op.tile.value.data),
                 nchw=bool(op.nchw.value.data),
+                channel_major=bool(op.channel_major.value.data),
             )
         ),
     )
@@ -211,11 +212,26 @@ def pack_conv2d_to_tiles_module(
     input_zero_point: int,
     tile: int,
     nchw: bool,
+    channel_major: bool = False,
 ) -> ModuleOp:
-    """Build RV32I-friendly im2col directly into loom's packed tile layout."""
+    """Build RV32I-friendly im2col directly into loom's packed tile layout.
+
+    K order is tap-major (kk = tap * C + c) by default. `channel_major` uses
+    kk = c * taps + tap instead, which makes each group of 8 output channels
+    of a block-diagonal (depthwise / pooling) weight read one contiguous K
+    slice, so the GEMM can skip the all-zero blocks.
+    """
 
     if tile <= 0 or not _is_power_of_two(tile):
         raise ValueError("tile must be a positive power of two")
+    if channel_major:
+        return _pack_conv2d_channel_major_module(
+            src_addr=src_addr, dst_addr=dst_addr, transform_addr=transform_addr,
+            input_h=input_h, input_w=input_w, channels=channels,
+            output_h=output_h, output_w=output_w, kernel_h=kernel_h, kernel_w=kernel_w,
+            stride_h=stride_h, stride_w=stride_w, pad_top=pad_top, pad_left=pad_left,
+            input_zero_point=input_zero_point, tile=tile, nchw=nchw,
+        )
 
     src_i = _i32_const(src_addr)
     dst_i = _i32_const(dst_addr)
@@ -279,8 +295,14 @@ def pack_conv2d_to_tiles_module(
     in_bounds = arith.AndIOp(row_in_bounds.result, spatial_in_bounds.result)
     kernel_pos0 = arith.MuliOp(ky, kernel_w_const.result)
     kernel_pos = arith.AddiOp(kernel_pos0.result, kx)
-    kk0 = arith.MuliOp(kernel_pos.result, channels_const.result)
+    if channel_major:
+        kk0 = arith.AddiOp(kernel_pos.result, c0.result)  # kk = c * taps + tap
+    else:
+        kk0 = arith.MuliOp(kernel_pos.result, channels_const.result)  # kk = tap * C + c
     dst_kk = arith.MuliOp(kk0.result, tile_const.result)
+    dst_cstride = _index_const(
+        (kernel_h * kernel_w * tile) if channel_major else tile
+    )
     dst_tap = arith.AddiOp(dst_row.result, dst_kk.result)
     if nchw:
         src_tap0 = arith.MuliOp(ih.result, input_w_const.result)
@@ -300,7 +322,7 @@ def pack_conv2d_to_tiles_module(
     channel = copy_block.args[0]
     src_c = arith.MuliOp(channel, src_cstride.result)
     src_linear = arith.AddiOp(src_tap.result, src_c.result)
-    dst_c = arith.MuliOp(channel, tile_const.result)
+    dst_c = arith.MuliOp(channel, dst_cstride.result)
     dst_linear = arith.AddiOp(dst_tap.result, dst_c.result)
     src_off = arith.IndexCastOp(src_linear.result, i32)
     src_ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[src_off.result])
@@ -327,7 +349,7 @@ def pack_conv2d_to_tiles_module(
 
     # Padding tap: fill the zero point.
     fchannel = fill_block.args[0]
-    fdst_c = arith.MuliOp(fchannel, tile_const.result)
+    fdst_c = arith.MuliOp(fchannel, dst_cstride.result)
     fdst_linear = arith.AddiOp(dst_tap.result, fdst_c.result)
     fdst_off = arith.IndexCastOp(fdst_linear.result, i32)
     fdst_ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[fdst_off.result])
@@ -347,7 +369,7 @@ def pack_conv2d_to_tiles_module(
     tap_if = scf.IfOp(in_bounds.result, [], Region(copy_loop_block), Region(fill_loop_block))
     kx_block.add_ops([
         ih, iw, ih_in_bounds, iw_in_bounds, spatial_in_bounds, in_bounds,
-        kernel_pos0, kernel_pos, kk0, dst_kk, dst_tap, *src_tap_ops, zero_point,
+        kernel_pos0, kernel_pos, kk0, dst_kk, dst_cstride, dst_tap, *src_tap_ops, zero_point,
         tap_if, scf.YieldOp(),
     ])
     kx_loop = scf.ForOp(c0.result, kernel_w_const.result, c1.result, [], Region(kx_block))
@@ -387,6 +409,147 @@ def pack_conv2d_to_tiles_module(
         ]
     )
     return ModuleOp([pack_func])
+
+
+def _pack_conv2d_channel_major_module(
+    *,
+    src_addr: int,
+    dst_addr: int,
+    transform_addr: int,
+    input_h: int,
+    input_w: int,
+    channels: int,
+    output_h: int,
+    output_w: int,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_top: int,
+    pad_left: int,
+    input_zero_point: int,
+    tile: int,
+    nchw: bool,
+) -> ModuleOp:
+    """im2col with channel-major K (kk = c * taps + tap), taps unrolled.
+
+    Loop nest m_tile -> row -> channel, with the kernel taps unrolled at
+    compile time: per row, each tap's source offset and in-bounds flag are
+    computed once; per channel, the taps write consecutive K rows (8 bytes
+    apart), keeping the same store locality as the tap-major layout.
+    Padding taps select the zero point; their (possibly out-of-range) source
+    address is still read, which is harmless in this SoC's flat RAM.
+    """
+    taps = kernel_h * kernel_w
+    k_total = taps * channels
+    src0 = llvm.IntToPtrOp(_i32_const(src_addr).result)
+    src_i = src0.operands[0].owner
+    dst_i = _i32_const(dst_addr)
+    dst0 = llvm.IntToPtrOp(dst_i.result)
+    transform_i = _i32_const(transform_addr)
+    transform0 = llvm.IntToPtrOp(transform_i.result)
+    c0 = _index_const(0)
+    c1 = _index_const(1)
+    consts = {
+        "m": _index_const(output_h * output_w),
+        "tile": _index_const(tile),
+        "ow": _index_const(output_w),
+        "ih": _index_const(input_h),
+        "iw": _index_const(input_w),
+        "c": _index_const(channels),
+        "sh": _index_const(stride_h),
+        "sw": _index_const(stride_w),
+        "pt": _index_const(pad_top),
+        "pl": _index_const(pad_left),
+        "dst_tile": _index_const(k_total * tile),
+        "dst_c": _index_const(taps * tile),
+        "src_c": _index_const(input_h * input_w if nchw else 1),
+    }
+    zero_point = _i8_const(input_zero_point)
+    c128 = _i32_const(128)
+
+    m_block = Block(arg_types=[IndexType()])
+    row_block = Block(arg_types=[IndexType()])
+    ch_block = Block(arg_types=[IndexType()])
+    m_base, row, channel = m_block.args[0], row_block.args[0], ch_block.args[0]
+
+    row_ops: list = []
+
+    def emit(op):
+        row_ops.append(op)
+        return op
+
+    out_index = emit(arith.AddiOp(m_base, row))
+    row_ok = emit(arith.CmpiOp(out_index.result, consts["m"].result, "ult"))
+    oh = emit(arith.DivUIOp(out_index.result, consts["ow"].result))
+    ow = emit(arith.RemUIOp(out_index.result, consts["ow"].result))
+    ih_b = emit(arith.SubiOp(emit(arith.MuliOp(oh.result, consts["sh"].result)).result, consts["pt"].result))
+    iw_b = emit(arith.SubiOp(emit(arith.MuliOp(ow.result, consts["sw"].result)).result, consts["pl"].result))
+    m_tile = emit(arith.DivUIOp(m_base, consts["tile"].result))
+    dst_row = emit(arith.AddiOp(emit(arith.MuliOp(m_tile.result, consts["dst_tile"].result)).result, row))
+
+    tap_src: list = []
+    tap_ok: list = []
+    for ky in range(kernel_h):
+        for kx in range(kernel_w):
+            ih = emit(arith.AddiOp(ih_b.result, _emit_index(emit, ky)))
+            iw = emit(arith.AddiOp(iw_b.result, _emit_index(emit, kx)))
+            ok_h = emit(arith.CmpiOp(ih.result, consts["ih"].result, "ult"))
+            ok_w = emit(arith.CmpiOp(iw.result, consts["iw"].result, "ult"))
+            ok = emit(arith.AndIOp(row_ok.result, emit(arith.AndIOp(ok_h.result, ok_w.result)).result))
+            pix = emit(arith.AddiOp(emit(arith.MuliOp(ih.result, consts["iw"].result)).result, iw.result))
+            base = pix if nchw else emit(arith.MuliOp(pix.result, consts["c"].result))
+            tap_src.append(base)
+            tap_ok.append(ok)
+
+    ch_ops: list = []
+    src_c = arith.MuliOp(channel, consts["src_c"].result)
+    dst_c0 = arith.MuliOp(channel, consts["dst_c"].result)
+    dst_c = arith.AddiOp(dst_row.result, dst_c0.result)
+    ch_ops += [src_c, dst_c0, dst_c]
+    for t in range(taps):
+        src_lin = arith.AddiOp(tap_src[t].result, src_c.result)
+        src_off = arith.IndexCastOp(src_lin.result, i32)
+        src_ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[src_off.result])
+        loaded = llvm.LoadOp(src_ptr.result, i8)
+        ch_ops += [src_lin, src_off, src_ptr, loaded]
+        value = loaded.results[0]
+        if transform_addr:
+            ext = arith.ExtSIOp(value, i32)
+            idx = arith.AddiOp(ext.result, c128.result)
+            lut_ptr = llvm.GEPOp(transform0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[idx.result])
+            mapped = llvm.LoadOp(lut_ptr.result, i8)
+            ch_ops += [ext, idx, lut_ptr, mapped]
+            value = mapped.results[0]
+        chosen = arith.SelectOp(tap_ok[t].result, value, zero_point.result)
+        dst_off0 = arith.IndexCastOp(dst_c.result, i32)
+        dst_off = arith.AddiOp(dst_off0.result, _i32_const_op(ch_ops, t * tile).result)
+        dst_ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[dst_off.result])
+        ch_ops += [chosen, dst_off0, dst_off, dst_ptr, llvm.StoreOp(chosen.result, dst_ptr.result)]
+    ch_block.add_ops([*ch_ops, scf.YieldOp()])
+
+    ch_loop = scf.ForOp(c0.result, consts["c"].result, c1.result, [], Region(ch_block))
+    row_block.add_ops([*row_ops, ch_loop, scf.YieldOp()])
+    row_loop = scf.ForOp(c0.result, consts["tile"].result, c1.result, [], Region(row_block))
+    m_block.add_ops([row_loop, scf.YieldOp()])
+    m_loop = scf.ForOp(c0.result, consts["m"].result, consts["tile"].result, [], Region(m_block))
+
+    pack_func = func.FuncOp("loom_pack_conv2d_to_tiles", ([], []))
+    pack_func.body.block.add_ops(
+        [src_i, src0, dst_i, dst0, transform_i, transform0, c0, c1, *consts.values(),
+         zero_point, c128, m_loop, func.ReturnOp()]
+    )
+    return ModuleOp([pack_func])
+
+
+def _emit_index(emit, value: int):
+    return emit(_index_const(value)).result
+
+
+def _i32_const_op(ops: list, value: int) -> arith.ConstantOp:
+    op = _i32_const(value)
+    ops.append(op)
+    return op
 
 
 def _i32_const(value: int) -> arith.ConstantOp:

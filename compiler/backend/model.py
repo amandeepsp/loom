@@ -346,6 +346,38 @@ def compile_onnx_model(
     return replace(compiled, source=source)
 
 
+def block_diagonal_taps(layer, tile: int = 8) -> int | None:
+    """Kernel taps if `layer` is a block-diagonal conv GEMM (depthwise, pooling).
+
+    Such layers are lowered as dense GEMMs over K = taps * C whose weight is
+    nonzero only where (kk % C) == output channel. With a channel-major K
+    order, each tile of output channels needs one contiguous K slice of
+    taps * tile rows, so the zero blocks never reach the array.
+    """
+    pk = getattr(layer, "packing", None)
+    if pk is None or layer.n != pk.channels or layer.n % tile:
+        return None
+    taps = pk.kernel_h * pk.kernel_w
+    if layer.k != taps * pk.channels:
+        return None
+    kk_channel = np.arange(layer.k)[:, None] % pk.channels
+    off_diagonal = kk_channel != np.arange(layer.n)[None, :]
+    if np.any(np.asarray(layer.weight)[off_diagonal]):
+        return None
+    return taps
+
+
+def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
+    """[taps * tile, C] stacked diagonal blocks in channel-major K order."""
+    channels = layer.n
+    weight = np.asarray(layer.weight, dtype=np.int8)
+    out = np.zeros((taps * tile, channels), dtype=np.int8)
+    for c in range(channels):
+        local = (c % tile) * taps
+        out[local : local + taps, c] = weight[[t * channels + c for t in range(taps)], c]
+    return out
+
+
 def compile_gemm(
     weight: np.ndarray,
     *,
@@ -520,6 +552,7 @@ def _compile_quantized_mobilenet(
             "activation_packed",
         )
         pack_name = _buffer_name(index, "pack_input")
+        taps = block_diagonal_taps(layer, tile)
         if layer.packing is None:
             pack_op = Pack2DToTilesOp(
                 pack_name,
@@ -542,6 +575,7 @@ def _compile_quantized_mobilenet(
                 src_addr=source.addr,
                 dst_addr=packed_input.addr,
                 transform_addr=transform_addr,
+                channel_major=taps is not None,
                 input_h=packing.input_h,
                 input_w=packing.input_w,
                 channels=packing.channels,
@@ -561,11 +595,13 @@ def _compile_quantized_mobilenet(
         loom_ops.append(pack_op)
         functions.append(RiscvFunction(pack_name, pack_code))
 
+        gemm_k = layer.k if taps is None else taps * tile
+        gemm_weight = layer.weight if taps is None else block_diagonal_weight(layer, taps, tile)
         weight_buffer = planner.add(
             _buffer_name(index, "weights"),
             0,
             "constant.weights",
-            pack_weight_rows(layer.weight, tile),
+            pack_weight_rows(gemm_weight, tile),
         )
         weight_buffer = _replace_size(planner, weight_buffer, len(weight_buffer.data))
         output = planner.add(
@@ -594,7 +630,7 @@ def _compile_quantized_mobilenet(
         gemm_op = GemmOp(
             layer.name,
             m=layer.m,
-            k=layer.k,
+            k=gemm_k,
             n=layer.n,
             padded_m=padded_m,
             tile=tile,
@@ -618,7 +654,7 @@ def _compile_quantized_mobilenet(
         affine_ops.extend(op.clone() for op in kernel_affine_ops)
         target_spec = GemmTargetSpec(
             m=padded_m,
-            k=layer.k,
+            k=gemm_k,
             n=layer.n,
             tile=tile,
             input_addr=packed_input.addr,
@@ -632,6 +668,8 @@ def _compile_quantized_mobilenet(
             activation_max=layer.activation_max,
             cfu_word_bits=cfu_word_bits,
             cfu_store_depth_words=cfu_store_depth_words,
+            input_k_stride=layer.k if taps is not None else 0,
+            input_n_k_offset=taps or 0,
         )
         kernel_riscv_module = lower_affine_kernel_to_riscv_scf(
             RiscvLoweringContext(spec=target_spec, csr=csr_map),

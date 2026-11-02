@@ -126,7 +126,7 @@ def _k_body(
     m_iv: SSAValue,
     k_iv: SSAValue,
 ) -> list[Operation]:
-    act_addr_ops, act_addr = _activation_dma_addr(ctx.spec, m_iv, k_iv)
+    act_addr_ops, act_addr = _activation_dma_addr(ctx.spec, m_iv, k_iv, n_iv)
     wgt_addr_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_iv, k_iv)
     flags_ops, flags = _compute_flags(ctx.spec, region, k_iv)
     k_count = rv32.LiOp(region.k_count)
@@ -245,13 +245,22 @@ def _activation_dma_addr(
     spec: GemmTargetSpec,
     m_iv: SSAValue,
     k_iv: SSAValue,
+    n_iv: SSAValue | None = None,
 ) -> tuple[list[Operation], SSAValue]:
-    m_ops, m_offset = _mul_const(m_iv, spec.k)
+    m_ops, m_offset = _mul_const(m_iv, spec.a_k_stride)
     k_ops, k_offset = _mul_const(k_iv, spec.tile)
     offset = riscv.AddOp(m_offset, k_offset)
+    ops: list[Operation] = [*m_ops, *k_ops, offset]
+    total = offset.rd
+    if spec.input_n_k_offset and n_iv is not None:
+        # n_iv advances by `tile` per N tile; skip to that tile's K slice.
+        n_ops, n_offset = _mul_const(n_iv, spec.input_n_k_offset * spec.tile)
+        add = riscv.AddOp(total, n_offset)
+        ops.extend([*n_ops, add])
+        total = add.rd
     base = rv32.LiOp(spec.input_addr)
-    addr = riscv.AddOp(base.rd, offset.rd)
-    return [*m_ops, *k_ops, offset, base, addr], addr.rd
+    addr = riscv.AddOp(base.rd, total)
+    return [*ops, base, addr], addr.rd
 
 
 def _weight_dma_addr(

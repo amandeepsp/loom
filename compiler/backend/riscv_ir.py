@@ -81,12 +81,18 @@ def _schedule_to_module(ctx: RiscvLoweringContext, schedule: AffineGemmSchedule)
 
 def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
     def n_body(n_iv: SSAValue) -> list[Operation]:
-        return _for_ops(
-            0,
-            region.m_region.upper,
-            region.m_region.step,
-            lambda m_iv: _m_region_body(ctx, region.n_count, region.m_region, n_iv, m_iv),
-        )
+        # Epilogue params depend only on the N tile and live in a CFU memory
+        # that nothing else writes, so upload them once per N tile rather
+        # than once per (M, N) tile.
+        return [
+            *_epilogue_ops(ctx, region.n_count, n_iv),
+            *_for_ops(
+                0,
+                region.m_region.upper,
+                region.m_region.step,
+                lambda m_iv: _m_region_body(ctx, region.n_count, region.m_region, n_iv, m_iv),
+            ),
+        ]
 
     return _for_ops(region.lower, region.upper, region.step, n_body)
 
@@ -99,7 +105,6 @@ def _m_region_body(
     m_iv: SSAValue,
 ) -> list[Operation]:
     out: list[Operation] = []
-    out.extend(_epilogue_ops(ctx, n_count, n_iv))
     for k_region in region.k_regions:
         out.extend(
             _for_ops(
@@ -174,19 +179,46 @@ def _store_result_ops(
     m_iv: SSAValue,
     n_iv: SSAValue,
 ) -> list[Operation]:
-    return [
-        *_for_ops(
-            0,
-            ctx.spec.tile,
-            1,
-            lambda row_iv: _for_ops(
-                0,
-                n_count,
-                1,
-                lambda col_iv: _store_result_body(ctx, m_iv, n_iv, row_iv, col_iv),
-            ),
-        )
-    ]
+    """Copy one finished tile from the CFU result buffer to the output matrix.
+
+    Per row: one row pointer (output + (m+row)*N + n) and one result-index
+    base; the column loop is fully unrolled (n_count <= tile is a compile-time
+    constant), so each element is addi + READ_RESULT + sb with an immediate
+    offset instead of re-deriving its address from scratch.
+    """
+    return _for_ops(
+        0,
+        ctx.spec.tile,
+        1,
+        lambda row_iv: _store_result_row(ctx, n_count, m_iv, n_iv, row_iv),
+    )
+
+
+def _store_result_row(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    m_iv: SSAValue,
+    n_iv: SSAValue,
+    row_iv: SSAValue,
+) -> list[Operation]:
+    m_row = riscv.AddOp(m_iv, row_iv)
+    row_offset_ops, row_offset = _mul_const(m_row.rd, ctx.spec.n)
+    col0 = riscv.AddOp(row_offset, n_iv)
+    base = rv32.LiOp(ctx.spec.output_addr)
+    row_ptr = riscv.AddOp(base.rd, col0.rd)
+    zero = rv32.LiOp(0)
+    index_ops, index_base = _tile_channel(ctx.spec, row_iv, zero.rd)
+    out: list[Operation] = [m_row, *row_offset_ops, col0, base, row_ptr, zero, *index_ops]
+    for col in range(n_count):
+        if col == 0:
+            index = index_base
+        else:
+            step = riscv.AddiOp(index_base, col)
+            out.append(step)
+            index = step.rd
+        read = loom_riscv.ReadResultOp(index)
+        out.extend([read, riscv.SbOp(row_ptr.rd, read.rd, col)])
+    return out
 
 
 def _epilogue_param_body(
@@ -207,34 +239,6 @@ def _epilogue_param_body(
         load_ops, value = _load_word_abs_indexed(base_addr, param_off.rd)
         out.extend([*load_ops, loom_riscv.WriteEpilogueParamOp(channel, value, field=field)])
     return out
-
-
-def _store_result_body(
-    ctx: RiscvLoweringContext,
-    m_iv: SSAValue,
-    n_iv: SSAValue,
-    row_iv: SSAValue,
-    col_iv: SSAValue,
-) -> list[Operation]:
-    index_ops, result_index = _tile_channel(ctx.spec, row_iv, col_iv)
-    read = loom_riscv.ReadResultOp(result_index)
-    m_row = riscv.AddOp(m_iv, row_iv)
-    row_offset_ops, row_offset = _mul_const(m_row.rd, ctx.spec.n)
-    n_col = riscv.AddOp(n_iv, col_iv)
-    output_offset = riscv.AddOp(row_offset, n_col.rd)
-    base = rv32.LiOp(ctx.spec.output_addr)
-    addr = riscv.AddOp(base.rd, output_offset.rd)
-    return [
-        *index_ops,
-        read,
-        m_row,
-        *row_offset_ops,
-        n_col,
-        output_offset,
-        base,
-        addr,
-        riscv.SbOp(addr.rd, read.rd, 0),
-    ]
 
 
 def _activation_dma_addr(

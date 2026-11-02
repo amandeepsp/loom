@@ -306,7 +306,7 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
         # CPU kernels read their source directly (no packed buffer): check
         # their output against the host model of the whole layer instead.
         packed = want if cpu_kernel else np.frombuffer(
-            transport.read_mem(pin["addr"], pin["size"]), np.int8)
+            transport.read_mem(pin["addr"], pm * kk), np.int8)  # excl. any sink tail
         actual = np.frombuffer(transport.read_mem(out["addr"], out["size"]), np.int8).reshape(pm, n)
         a = packed.reshape(pm // tile, kk, tile).transpose(0, 2, 1).reshape(pm, kk)
         acc = a.astype(np.int64) @ weight.astype(np.int64)

@@ -64,8 +64,39 @@ class TestCfuTop:
             "seq_state_debug",
             "seq_busy_debug",
             "error_warn_debug",
+            "dma_act_busy",
+            "dma_wgt_busy",
         ]:
             assert name in v, f"missing port: {name}"
+
+    def test_performance_counters(self):
+        """DMA activity/traffic counters are readable and resettable."""
+
+        async def testbench(ctx):
+            await cfu_op(ctx, dut, funct3=5, funct7=0, in0=0, in1=0)
+
+            ctx.set(dut.dma_act_busy, 1)
+            ctx.set(dut.dma_wgt_busy, 1)
+            for cycle in range(5):
+                ctx.set(dut.dma_act.en, cycle < 3)
+                ctx.set(dut.dma_wgt.en, cycle < 2)
+                await ctx.tick()
+            ctx.set(dut.dma_act_busy, 0)
+            ctx.set(dut.dma_wgt_busy, 0)
+            ctx.set(dut.dma_act.en, 0)
+            ctx.set(dut.dma_wgt.en, 0)
+            await ctx.tick()
+
+            assert await cfu_op(ctx, dut, funct3=5, funct7=2, in0=0, in1=0) == 5
+
+            await cfu_op(ctx, dut, funct3=5, funct7=0, in0=0, in1=0)
+            assert await cfu_op(ctx, dut, funct3=5, funct7=2, in0=0, in1=0) == 0
+
+        dut = Top(TopConfig(rows=4, cols=4))
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()
 
 
 class TestIntegration:

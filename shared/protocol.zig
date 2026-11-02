@@ -11,6 +11,7 @@ pub const OpType = enum(u8) {
     write = 0x11,
     exec = 0x12,
     exec_model = 0x13,
+    perf = 0x14,
     _,
 };
 
@@ -101,5 +102,17 @@ pub const ExecModel = struct {
     pub const Req = extern struct {
         addr: u32,
         len: u32,
+    };
+};
+
+pub const Perf = struct {
+    pub const Req = extern struct {
+        reset: u32,
+    };
+
+    pub const Counters = extern struct {
+        seq_busy_cycles: u32,
+        dma_active_cycles: u32,
+        overlap_cycles: u32,
     };
 };

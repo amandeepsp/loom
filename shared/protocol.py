@@ -18,6 +18,7 @@ OP_READ = 0x10
 OP_WRITE = 0x11
 OP_EXEC = 0x12
 OP_EXEC_MODEL = 0x13
+OP_PERF = 0x14
 
 STATUS_OK = 0x00
 WRITE_CHUNK_MAX = 1024
@@ -30,6 +31,13 @@ class Response:
     status: int
     payload: bytes
     cycles_lo: int
+
+
+@dataclass(frozen=True)
+class PerfCounters:
+    seq_busy_cycles: int
+    dma_active_cycles: int
+    overlap_cycles: int
 
 
 class ProtocolError(RuntimeError):
@@ -121,6 +129,10 @@ class BaseTransport:
     def exec_model(self, addr: int, length: int) -> int:
         data = self._request(OP_EXEC_MODEL, struct.pack("<II", addr, length), expected_len=4)
         return struct.unpack("<I", data)[0]
+
+    def perf_counters(self, *, reset: bool = False) -> PerfCounters:
+        data = self._request(OP_PERF, struct.pack("<I", int(reset)), expected_len=3 * 4)
+        return PerfCounters(*struct.unpack("<3I", data))
 
     def ping(self) -> None:
         self._request(OP_PING, b"", expected_len=0)

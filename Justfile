@@ -28,7 +28,7 @@ verilog:
 hw-build: verilog
     env PATH={{ oss_cad_bin }}:{{ env_var('PATH') }} \
         uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
-        --build --toolchain apicula \
+        --build --toolchain apicula --pnr-seed 2 \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \
         --cfu-rows {{ cfu_rows }} \
         --cfu-cols {{ cfu_cols }} \
@@ -48,7 +48,7 @@ hw-reset:
 
 # Build libloom.so for host Python binding
 libloom:
-    zig build libaccel -Dbuild-dir=build/sipeed_tang_nano_20k
+    zig build host-lib -Dbuild-dir=build/sipeed_tang_nano_20k
 
 # Train + export a quantized MNIST ONNX for compiler/hardware smoke tests (no-op if present).
 mnist-model:
@@ -62,6 +62,44 @@ mobilenet-model:
         -o build/mobilenet_v1_025.lmb \
         --csr-json build/sipeed_tang_nano_20k/csr.json \
         --manifest
+
+# Collect source-backed hardware/software showcase analytics.
+showcase-metrics: mobilenet-model
+    uv run python -m tools.showcase_metrics collect --output-dir build/showcase
+
+# Render and browser-verify the portable showcase dashboard.
+showcase-dashboard: showcase-metrics
+    node tools/build_showcase_dashboard.mjs \
+        build/showcase/artifact.json \
+        build/showcase/loom-showcase.html
+
+# Export nextpnr's native Gowin placement geometry for the showcase.
+showcase-nextpnr:
+    mkdir -p build/showcase/nextpnr
+    cd build/sipeed_tang_nano_20k/gateware && \
+        env PATH={{ oss_cad_bin }}:{{ env_var('PATH') }} \
+        nextpnr-himbaechel \
+            --json sipeed_tang_nano_20k.json \
+            --top sipeed_tang_nano_20k \
+            --device GW2AR-LV18QN88C8/I7 \
+            --vopt family=GW2A-18C \
+            --vopt cst=sipeed_tang_nano_20k.cst \
+            --timing-allow-fail \
+            --seed 2 \
+            --no-route \
+            --placed-svg ../../../build/showcase/nextpnr/placed.svg
+
+# Export square Matplotlib PNGs for social posts and routing review.
+showcase-pngs: showcase-metrics showcase-nextpnr
+    uv run --with matplotlib python -m tools.export_showcase_pngs \
+        --nextpnr-svg build/showcase/nextpnr/placed.svg \
+        --output-dir build/showcase/png
+
+# Refresh theoretical-vs-achieved GEMM and schedule-overlap measurements on hardware.
+showcase-benchmark port=port:
+    uv run python -m tools.showcase_metrics benchmark \
+        --port {{ port }} \
+        --output analytics/measurements/gemm_sweep.json
 
 # Build firmware targeting the hardware SoC
 hw-firmware build-dir="build/sipeed_tang_nano_20k":

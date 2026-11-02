@@ -1,0 +1,344 @@
+{
+  "board": "Sipeed Tang Nano 20K",
+  "captured_at": "2026-07-13T16:33:30.771040Z",
+  "clock_hz": 48000000,
+  "results": [
+    {
+      "counters": {
+        "dma_active_cycles": 57,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 90
+      },
+      "cycles": 183327,
+      "k": 8,
+      "m": 8,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 54,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 90
+      },
+      "cycles": 183333,
+      "k": 8,
+      "m": 8,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 284,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 146
+      },
+      "cycles": 183327,
+      "k": 64,
+      "m": 8,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 294,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 146
+      },
+      "cycles": 183340,
+      "k": 64,
+      "m": 8,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 1080,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 338
+      },
+      "cycles": 183326,
+      "k": 256,
+      "m": 8,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 1087,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 338
+      },
+      "cycles": 183326,
+      "k": 256,
+      "m": 8,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 2171,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 610
+      },
+      "cycles": 266621,
+      "k": 512,
+      "m": 8,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 2161,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 610
+      },
+      "cycles": 266615,
+      "k": 512,
+      "m": 8,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 1138,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 584
+      },
+      "cycles": 683070,
+      "k": 64,
+      "m": 16,
+      "n": 16,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 1132,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 584
+      },
+      "cycles": 683074,
+      "k": 64,
+      "m": 16,
+      "n": 16,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 8839,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 3360
+      },
+      "cycles": 2682124,
+      "k": 128,
+      "m": 32,
+      "n": 32,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 8858,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 3360
+      },
+      "cycles": 2682129,
+      "k": 128,
+      "m": 32,
+      "n": 32,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 69387,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 21632
+      },
+      "cycles": 10678336,
+      "k": 256,
+      "m": 64,
+      "n": 64,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 69380,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 21632
+      },
+      "cycles": 10678336,
+      "k": 256,
+      "m": 64,
+      "n": 64,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 16905,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 13952
+      },
+      "cycles": 21339939,
+      "k": 27,
+      "m": 1024,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 16920,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 13952
+      },
+      "cycles": 21339945,
+      "k": 27,
+      "m": 1024,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 40501,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 19712
+      },
+      "cycles": 21339961,
+      "k": 72,
+      "m": 1024,
+      "n": 8,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 40512,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 19712
+      },
+      "cycles": 21339959,
+      "k": 72,
+      "m": 1024,
+      "n": 8,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 157900,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 49408
+      },
+      "cycles": 32001545,
+      "k": 288,
+      "m": 256,
+      "n": 32,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 157894,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 49408
+      },
+      "cycles": 32001552,
+      "k": 288,
+      "m": 256,
+      "n": 32,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 156392,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 41536
+      },
+      "cycles": 16009136,
+      "k": 1152,
+      "m": 16,
+      "n": 128,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 156421,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 41536
+      },
+      "cycles": 16009137,
+      "k": 1152,
+      "m": 16,
+      "n": 128,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 312397,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 80448
+      },
+      "cycles": 26670751,
+      "k": 2304,
+      "m": 4,
+      "n": 256,
+      "variant": "non-pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    },
+    {
+      "counters": {
+        "dma_active_cycles": 312331,
+        "overlap_cycles": 0,
+        "seq_busy_cycles": 80448
+      },
+      "cycles": 26670740,
+      "k": 2304,
+      "m": 4,
+      "n": 256,
+      "variant": "pipelined",
+      "verification_tolerance_lsb": 1,
+      "verified": true
+    }
+  ],
+  "schema_version": 1
+}

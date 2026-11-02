@@ -101,3 +101,39 @@ class ReadResultInstruction(Instruction):
 
         self.signal_done(m)
         return m
+
+
+class PerfCounterInstruction(Instruction):
+    """funct3=5: reset or read one hardware performance counter.
+
+    funct7=0 resets every counter. Selectors 1..3 return the counters wired
+    by :class:`hardware.top.Top`. Keeping the counters in the top level lets
+    them observe the DMA ports and sequencer at the same time.
+    """
+
+    seq_busy_cycles: In(32)
+    dma_active_cycles: In(32)
+    overlap_cycles: In(32)
+    reset_counters: Out(1)
+
+    def elaborate(self, platform):
+        m = super().elaborate(platform)
+
+        m.d.comb += [
+            self.output.eq(0),
+            self.reset_counters.eq(self.start & (self.funct7 == 0)),
+        ]
+        with m.Switch(self.funct7):
+            for selector, counter in enumerate(
+                (
+                    self.seq_busy_cycles,
+                    self.dma_active_cycles,
+                    self.overlap_cycles,
+                ),
+                start=1,
+            ):
+                with m.Case(selector):
+                    m.d.comb += self.output.eq(counter)
+
+        self.signal_done(m)
+        return m

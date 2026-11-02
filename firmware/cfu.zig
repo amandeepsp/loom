@@ -9,6 +9,7 @@
 ///   2 = EPI_PARAM
 ///   3 = CONFIG
 ///   4 = READ_RESULT
+///   5 = PERF_COUNTER (funct7=0 reset, 1..3 read)
 pub const EpiParamField = enum(u3) {
     bias = 0,
     multiplier = 1,
@@ -19,6 +20,12 @@ pub const ConfigRegister = enum(u3) {
     output_offset = 0,
     activation_min = 1,
     activation_max = 2,
+};
+
+pub const PerfCounter = enum(u7) {
+    seq_busy_cycles = 1,
+    dma_active_cycles = 2,
+    overlap_cycles = 3,
 };
 
 pub inline fn op(comptime funct3: u3, comptime funct7: u7, rs1: i32, rs2: i32) i32 {
@@ -63,4 +70,12 @@ pub inline fn setActivationMax(value: i32) void {
 
 pub inline fn readResult(index: i32) i32 {
     return op(4, 0, index, 0);
+}
+
+pub inline fn resetPerfCounters() void {
+    _ = op(5, 0, 0, 0);
+}
+
+pub inline fn readPerfCounter(comptime counter: PerfCounter) u32 {
+    return @bitCast(op(5, @intFromEnum(counter), 0, 0));
 }

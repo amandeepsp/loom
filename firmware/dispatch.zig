@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config");
+const cfu = @import("cfu.zig");
 const interpreter = @import("interpreter.zig");
 const link = @import("link.zig");
 const memory = @import("memory.zig");
@@ -14,8 +15,28 @@ pub fn dispatch(header: link.Header) void {
         .write => memory.writeMem(header),
         .exec => exec(header),
         .exec_model => execModel(header),
+        .perf => perf(header),
         else => link.sendError(header.seq_id, .unknown_op, &.{}),
     }
+}
+
+fn perf(header: link.Header) void {
+    if (header.payload_len != @sizeOf(protocol.Perf.Req)) {
+        link.drainPayload(header.payload_len);
+        link.sendError(header.seq_id, .bad_payload_len, &.{});
+        return;
+    }
+
+    var req: protocol.Perf.Req = undefined;
+    uart.readBytes(std.mem.asBytes(&req));
+    if (req.reset != 0) cfu.resetPerfCounters();
+
+    const counters = protocol.Perf.Counters{
+        .seq_busy_cycles = cfu.readPerfCounter(.seq_busy_cycles),
+        .dma_active_cycles = cfu.readPerfCounter(.dma_active_cycles),
+        .overlap_cycles = cfu.readPerfCounter(.overlap_cycles),
+    };
+    link.sendResponse(header.seq_id, .ok, std.mem.asBytes(&counters), 0);
 }
 
 fn ping(header: link.Header) void {

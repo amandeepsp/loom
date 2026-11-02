@@ -215,6 +215,13 @@ pub const Driver = struct {
         try self.issuePayload(.exec_model, std.mem.asBytes(&req), &response);
         return std.mem.readInt(u32, &response, .little);
     }
+
+    pub fn perfCounters(self: *Driver, reset: bool) !protocol.Perf.Counters {
+        const req = protocol.Perf.Req{ .reset = @intFromBool(reset) };
+        var response: protocol.Perf.Counters = undefined;
+        try self.issuePayload(.perf, std.mem.asBytes(&req), std.mem.asBytes(&response));
+        return response;
+    }
 };
 
 const Transport = union(enum) {

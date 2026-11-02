@@ -72,6 +72,31 @@ RTL changes and firmware builds have a strict dependency chain:
 
 Skipping step 2 before step 4 causes `csr.json not found` errors.
 
+## Showcase Analytics
+
+The reproducible showcase dashboard separates hardware and software/compiler
+metrics and compares theoretical ceilings with measured board performance:
+
+```sh
+# Refresh the counter-backed GEMM roofline sweep.
+just showcase-benchmark
+
+# Collect P&R, model, accuracy, cycle, arithmetic-intensity, and sweep data.
+just showcase-metrics
+
+# Export five square 1600x1600 Matplotlib PNGs, including native nextpnr
+# placement and a routed-wire occupancy/connectivity view.
+just showcase-pngs
+```
+
+See [`analytics/README.md`](analytics/README.md) for metric definitions and the
+portable HTML build command. Hardware counters separate array-active, DMA, and
+concurrent overlap cycles from complete compiled-model time; streamed KIR is
+kept separate because its `mcycle` measurement includes UART delivery. The
+Gowin nextpnr backend does not implement native wire/pip SVG graphics, so the
+routing figure uses its routed JSON attributes rather than implying that
+`--routed-svg` contains connections.
+
 ## Configuration
 
 Array dimensions and scratchpad depth are configured in the `Justfile` and must match across Verilog generation, firmware build, and E2E tests:

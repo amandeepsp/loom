@@ -74,6 +74,7 @@ class CfuDmaAdapter(Module):
         self.addr = Signal(addr_bits)
         self.data = Signal(len(dma_reader.source.data))
         self.en   = Signal()
+        self.busy = Signal()
 
         addr_counter = Signal(addr_bits)
 
@@ -85,6 +86,13 @@ class CfuDmaAdapter(Module):
         ]
 
         self.sync += [
+            If(~dma_reader.enable,
+                self.busy.eq(0),
+            ).Elif(dma_reader.source.valid & dma_reader.source.ready & dma_reader.source.last,
+                self.busy.eq(0),
+            ).Elif(dma_reader.enable & ~dma_reader._done.status,
+                self.busy.eq(1),
+            ),
             If(dma_reader.source.valid & dma_reader.source.ready,
                 If(dma_reader.source.last,
                     addr_counter.eq(0),
@@ -172,9 +180,11 @@ class LoomSimSoC(SoCCore):
                     "i_dma_act__addr": act_adapter.addr,
                     "i_dma_act__data": act_adapter.data,
                     "i_dma_act__en":   act_adapter.en,
+                    "i_dma_act_busy":  act_adapter.busy,
                     "i_dma_wgt__addr": wgt_adapter.addr,
                     "i_dma_wgt__data": wgt_adapter.data,
                     "i_dma_wgt__en":   wgt_adapter.en,
+                    "i_dma_wgt_busy":  wgt_adapter.busy,
                 })
 
         # Debug ------------------------------------------------------------------------------------

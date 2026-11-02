@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-13T19:31:00+05:30",
+  "board": "Sipeed Tang Nano 20K",
+  "model": "mobilenet_v1_025_int8",
+  "clock_hz": 48000000,
+  "sample": {
+    "dataset": "CIFAR-10 test",
+    "count": 200,
+    "selection": "20 randomly selected images per class",
+    "seed": 2026
+  },
+  "cycles": {
+    "mean": 48964353,
+    "min": 48918714,
+    "max": 49016798
+  },
+  "hardware_profile": {
+    "captured_at": "2026-07-13T22:15:41+05:30",
+    "sample_count": 1,
+    "input": "build/mobilenet_input_i8.bin",
+    "total_cycles": 48993503,
+    "seq_busy_cycles": 634212,
+    "dma_active_cycles": 1981270,
+    "overlap_cycles": 288455,
+    "counter_width_bits": 26
+  },
+  "accuracy": {
+    "fp32_correct": 178,
+    "ort_int8_correct": 178,
+    "compiler_int8_correct": 174,
+    "hardware_int8_correct": 174
+  },
+  "agreement": {
+    "hardware_compiler_exact_logits": 200,
+    "hardware_compiler_prediction": 200,
+    "hardware_ort_prediction": 191,
+    "hardware_ort_max_logit_delta": 23,
+    "hardware_ort_delta_p50": 5,
+    "hardware_ort_delta_p90": 12,
+    "hardware_ort_delta_p95": 14,
+    "hardware_ort_delta_p99": 23
+  }
+}

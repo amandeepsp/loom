@@ -25,6 +25,7 @@ from hardware.decoder.instructions import (
     EpiParamInstruction,
     ConfigInstruction,
     ReadResultInstruction,
+    PerfCounterInstruction,
 )
 
 
@@ -62,10 +63,13 @@ class Top(Cfu):
         sig_wgt = DmaWriteSignature(addr_width=addr_bits, data_width=self.config.wgt_line_width)
         self.dma_act = sig_act.create(path=("dma_act",))
         self.dma_wgt = sig_wgt.create(path=("dma_wgt",))
+        self.dma_act_busy = Signal(name="dma_act_busy")
+        self.dma_wgt_busy = Signal(name="dma_wgt_busy")
 
         self.ports += [
             self.dma_act.addr, self.dma_act.data, self.dma_act.en,
             self.dma_wgt.addr, self.dma_wgt.data, self.dma_wgt.en,
+            self.dma_act_busy, self.dma_wgt_busy,
         ]
         self.seq_state_debug = Signal(8, name="seq_state_debug")
         self.seq_busy_debug = Signal(name="seq_busy_debug")
@@ -83,12 +87,14 @@ class Top(Cfu):
         m.submodules.i_epi_param = self.i_epi_param = EpiParamInstruction()
         m.submodules.i_config = self.i_config = ConfigInstruction()
         m.submodules.i_read_result = self.i_read_result = ReadResultInstruction()
+        m.submodules.i_perf_counter = self.i_perf_counter = PerfCounterInstruction()
         return {
             0: self.i_compute_start,
             1: self.i_compute_wait,
             2: self.i_epi_param,
             3: self.i_config,
             4: self.i_read_result,
+            5: self.i_perf_counter,
         }
 
     def elaborate(self, platform):
@@ -222,6 +228,45 @@ class Top(Cfu):
             self.seq_busy_debug.eq(seq.busy_debug),
             self.error_warn_debug.eq(0),
         ]
+
+        # === Performance counters =======================================
+
+        # Selectors are part of the loom CUSTOM0 ISA; keep this order in
+        # sync with firmware/cfu.zig and shared/protocol.{zig,py}.
+        perf = self.i_perf_counter
+        # 26 bits covers a single 49M-cycle MobileNet inference while saving
+        # enough registers/LUTs to keep the design placeable on this FPGA.
+        perf_counters = [Signal(26, name=name) for name in (
+            "perf_seq_busy_cycles",
+            "perf_dma_active_cycles",
+            "perf_overlap_cycles",
+        )]
+        (
+            seq_busy_cycles,
+            dma_active_cycles,
+            overlap_cycles,
+        ) = perf_counters
+
+        dma_active = self.dma_act_busy | self.dma_wgt_busy
+        with m.If(perf.reset_counters):
+            m.d.sync += [counter.eq(0) for counter in perf_counters]
+        with m.Else():
+            with m.If(seq.busy_debug):
+                m.d.sync += seq_busy_cycles.eq(seq_busy_cycles + 1)
+            with m.If(dma_active):
+                m.d.sync += dma_active_cycles.eq(dma_active_cycles + 1)
+            with m.If(dma_active & seq.busy_debug):
+                m.d.sync += overlap_cycles.eq(overlap_cycles + 1)
+
+        for port, counter in zip(
+            (
+                perf.seq_busy_cycles,
+                perf.dma_active_cycles,
+                perf.overlap_cycles,
+            ),
+            perf_counters,
+        ):
+            m.d.comb += port.eq(counter)
 
         # EPI_PARAM → PerChannelStore
         i_ep = self.i_epi_param

@@ -16,6 +16,11 @@ Correctness gate (all must hold, else the experiment is rejected):
    bug corrupts a handful of elements, e.g. ~8/8192 in mobilenet_conv_6.)
 2. End to end: argmax agrees with ONNX Runtime on every image and the max
    logit delta vs ONNX stays within --delta-budget.
+3. Dense GEMMs (random int8 weights, multi-chunk K, many N tiles) via
+   tests.test_gemm: no element off by more than 1, and off-by-one elements
+   (a known large-K rounding issue, ~1-2% at K=1152) within 3%. MobileNet's
+   depthwise layers are mostly zero weights, so they hide stale-data races
+   that dense GEMMs expose (this caught a too-short DMA drain fence).
 
 A golden snapshot of outputs is still recorded and compared for information,
 but the hardware bug makes outputs slightly non-deterministic, so it is not
@@ -96,6 +101,7 @@ def main() -> int:
         layer_wrong = (
             layer_errors(artifact, onnx_path, transport) if args.model == "mobilenet" else {}
         )
+        gemm_checks = dense_gemm_failures(transport, args.csr_json) if args.model == "mobilenet" else []
     finally:
         transport.close()
     t_sync = time.monotonic() - t_sync
@@ -123,6 +129,9 @@ def main() -> int:
         reasons.append(f"logit delta {delta} > {args.delta_budget}")
     if wrong_total > args.wrong_budget:
         reasons.append(f"{wrong_total} wrong GEMM elements > {args.wrong_budget}")
+    if args.model == "mobilenet":
+        for desc in gemm_checks:
+            reasons.append(desc)
     passed = not reasons
     correct = sum(int(o.argmax()) == s.label for o, s in zip(outputs, samples))
 
@@ -188,6 +197,22 @@ def main() -> int:
         with LOG.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     return 0 if passed else 1
+
+
+DENSE_GEMMS = ((16, 1152, 128), (64, 256, 64), (8, 2000, 8), (20, 100, 24))
+
+
+def dense_gemm_failures(transport, csr_json: str) -> list[str]:
+    """Run dense random GEMMs; return a reason string per failing shape."""
+    from tests.test_gemm import run_gemm
+
+    failures = []
+    for m, k, n in DENSE_GEMMS:
+        r = run_gemm(transport, m, k, n, csr_json=Path(csr_json), read_counters=False)
+        off_by_one = r.total - r.exact
+        if r.max_delta > 1 or off_by_one > 0.03 * r.total:
+            failures.append(f"dense GEMM {m}x{k}x{n}: {r.exact}/{r.total} exact, max|Δ|={r.max_delta}")
+    return failures
 
 
 def host_pack(layer, source: np.ndarray, tile: int, padded_m: int) -> np.ndarray:

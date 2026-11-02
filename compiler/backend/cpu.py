@@ -755,55 +755,72 @@ def _pack_conv2d_rowwords_module(
     kk_scale = temit(_index_const((1 if channel_major else channels) * tile))
     dst_tap = temit(arith.AddiOp(dst_mt.result, temit(arith.MuliOp(tap.result, kk_scale.result)).result))
 
-    ch_block = Block(arg_types=[IndexType()])
-    channel = ch_block.args[0]
-    ops: list = []
-    src_c = arith.MuliOp(channel, k["src_c"].result)
-    dst_c0 = arith.MuliOp(channel, k["dst_c"].result)
-    dst_c = arith.AddiOp(dst_tap.result, dst_c0.result)
-    dst_c32 = arith.IndexCastOp(dst_c.result, i32)
-    ops += [src_c, dst_c0, dst_c, dst_c32]
-    words = [None, None]
-    for r in range(tile):
-        lin = arith.AddiOp(row_src[r].result, src_c.result)
-        off = arith.IndexCastOp(lin.result, i32)
-        ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
-        val = llvm.LoadOp(ptr.result, i8)
-        ops += [lin, off, ptr, val]
-        v = val.results[0]
-        if transform_addr:
-            ext = arith.ExtSIOp(v, i32)
-            idx = arith.AddiOp(ext.result, c128.result)
-            lptr = llvm.GEPOp(transform0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[idx.result])
-            mapped = llvm.LoadOp(lptr.result, i8)
-            ops += [ext, idx, lptr, mapped]
-            v = mapped.results[0]
-        chosen = arith.SelectOp(row_ok[r].result, v, zero_point.result)
-        wide = arith.ExtUIOp(chosen.result, i32)
-        ops += [chosen, wide]
-        part = wide.result
-        if r % 4:
-            sh = arith.ShLIOp(part, shifts[r].result)
-            ops.append(sh)
-            part = sh.result
-        w = r // 4
-        if words[w] is None:
-            words[w] = part
-        else:
-            acc = arith.OrIOp(words[w], part)
-            ops.append(acc)
-            words[w] = acc.result
-    for w in range(2):
-        if w:
-            off = arith.AddiOp(dst_c32.result, _i32_const_op(ops, 4).result)
-            ops.append(off)
-        else:
-            off = dst_c32
-        ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
-        ops += [ptr, llvm.StoreOp(words[w], ptr.result, alignment=4)]
-    ch_block.add_ops([*ops, scf.YieldOp()])
-    ch_loop = scf.ForOp(c0.result, k["c"].result, c1.result, [], Region(ch_block))
-    kx_block.add_ops([*tap_ops, ch_loop, scf.YieldOp()])
+    def channel_loop(check_rows: bool) -> scf.ForOp:
+        """Copy every channel of this tap; `check_rows` selects the zero point
+        for out-of-bounds rows (border taps only)."""
+        ch_block = Block(arg_types=[IndexType()])
+        channel = ch_block.args[0]
+        ops: list = []
+        src_c = arith.MuliOp(channel, k["src_c"].result)
+        dst_c0 = arith.MuliOp(channel, k["dst_c"].result)
+        dst_c = arith.AddiOp(dst_tap.result, dst_c0.result)
+        dst_c32 = arith.IndexCastOp(dst_c.result, i32)
+        ops += [src_c, dst_c0, dst_c, dst_c32]
+        words = [None, None]
+        for r in range(tile):
+            lin = arith.AddiOp(row_src[r].result, src_c.result)
+            off = arith.IndexCastOp(lin.result, i32)
+            ptr = llvm.GEPOp(src0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+            val = llvm.LoadOp(ptr.result, i8)
+            ops += [lin, off, ptr, val]
+            v = val.results[0]
+            if transform_addr:
+                ext = arith.ExtSIOp(v, i32)
+                idx = arith.AddiOp(ext.result, c128.result)
+                lptr = llvm.GEPOp(transform0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[idx.result])
+                mapped = llvm.LoadOp(lptr.result, i8)
+                ops += [ext, idx, lptr, mapped]
+                v = mapped.results[0]
+            if check_rows:
+                chosen = arith.SelectOp(row_ok[r].result, v, zero_point.result)
+                ops.append(chosen)
+                v = chosen.result
+            wide = arith.ExtUIOp(v, i32)
+            ops.append(wide)
+            part = wide.result
+            if r % 4:
+                sh = arith.ShLIOp(part, shifts[r].result)
+                ops.append(sh)
+                part = sh.result
+            w = r // 4
+            if words[w] is None:
+                words[w] = part
+            else:
+                acc = arith.OrIOp(words[w], part)
+                ops.append(acc)
+                words[w] = acc.result
+        for w in range(2):
+            if w:
+                off = arith.AddiOp(dst_c32.result, _i32_const_op(ops, 4).result)
+                ops.append(off)
+            else:
+                off = dst_c32
+            ptr = llvm.GEPOp(dst0.output, [llvm.GEP_USE_SSA_VAL], i8, ssa_indices=[off.result])
+            ops += [ptr, llvm.StoreOp(words[w], ptr.result, alignment=4)]
+        ch_block.add_ops([*ops, scf.YieldOp()])
+        return scf.ForOp(c0.result, k["c"].result, c1.result, [], Region(ch_block))
+
+    # Interior taps (all 8 rows in bounds, the common case) skip the per-byte
+    # padding select; border taps keep it.
+    all_ok = row_ok[0]
+    for ok in row_ok[1:]:
+        all_ok = temit(arith.AndIOp(all_ok.result, ok.result))
+    fast = Block()
+    fast.add_ops([channel_loop(False), scf.YieldOp()])
+    slow = Block()
+    slow.add_ops([channel_loop(True), scf.YieldOp()])
+    tap_if = scf.IfOp(all_ok.result, [], Region(fast), Region(slow))
+    kx_block.add_ops([*tap_ops, tap_if, scf.YieldOp()])
     kh_const = emit(_index_const(kernel_h))
     kwl_const = emit(_index_const(kernel_w))
     kx_loop = scf.ForOp(c0.result, kwl_const.result, c1.result, [], Region(kx_block))

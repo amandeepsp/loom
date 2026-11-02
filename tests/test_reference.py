@@ -113,3 +113,36 @@ def test_runtime_uploads_model_blob_once():
     blob_writes = [w for w in transport.writes if w == (runtime.model_addr, len(artifact.blob))]
     assert len(blob_writes) == 1
     assert len(transport.writes) == 3  # blob once + input twice
+
+
+class _ResidentTransport(_RecordingTransport):
+    """Device that already holds the blob: checksum returns its CRC."""
+
+    def __init__(self, blob: bytes) -> None:
+        super().__init__(80)
+        import zlib
+
+        self._crc = zlib.crc32(blob)
+        self.checksum_calls = 0
+
+    def checksum(self, addr: int, length: int) -> int:
+        self.checksum_calls += 1
+        return self._crc
+
+
+def test_runtime_skips_upload_when_model_resident():
+    artifact = ModelBinaryArtifact.from_bytes(compile_onnx_model(DEFAULT_ONNX).to_bytes())
+    transport = _ResidentTransport(artifact.blob)
+    runtime = ModelBinaryRuntime(artifact, transport)
+    runtime.run_quantized(np.zeros((1, 784), dtype=np.int8))
+    assert transport.checksum_calls == 1
+    assert runtime.uploaded_bytes == 0
+    assert all(length != len(artifact.blob) for _addr, length in transport.writes)
+
+
+def test_runtime_uploads_when_resident_model_differs():
+    artifact = ModelBinaryArtifact.from_bytes(compile_onnx_model(DEFAULT_ONNX).to_bytes())
+    transport = _ResidentTransport(b"some other model")
+    runtime = ModelBinaryRuntime(artifact, transport)
+    runtime.run_quantized(np.zeros((1, 784), dtype=np.int8))
+    assert runtime.uploaded_bytes == len(artifact.blob)

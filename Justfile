@@ -53,8 +53,7 @@ firmware target="hw": (_firmware-deps target)
     zig build firmware \
         -Dbuild-dir={{ if target == "sim" { sim_dir } else { hw_dir } }} \
         -Dcfu-rows={{ cfu_rows }} -Dcfu-cols={{ cfu_cols }} \
-        -Dcfu-store-depth={{ cfu_store_depth }} \
-        -Ddebug-info={{ if target == "sim" { "true" } else { "false" } }}
+        -Dcfu-store-depth={{ cfu_store_depth }}
 
 _firmware-deps target:
     @if [ "{{ target }}" = "sim" ]; then just sim-soc; \
@@ -116,20 +115,22 @@ test *args:
     uv run pytest {{ args }}
     zig build test
 
-# End-to-end GEMM on hw or sim.  Tunable: m, k, n, variant, tolerance.
-gemm target="hw" m="8" k="8" n="8" variant="all" tolerance="1": (_run-deps target)
+# End-to-end GEMM (compiled .lmb) on hw or sim, verified bit-exact.  Tunable: m, k, n.
+gemm target="hw" m="8" k="8" n="8" tolerance="0": (_run-deps target)
     {{ if target == "sim" { _sim_launch } else { "" } }} \
     uv run python -m tests.test_gemm \
-        {{ if target == "sim" { "tcp://127.0.0.1:" + sim_port + " --driver-timeout 1800" } else { port } }} \
-        {{ variant }} --m {{ m }} --k {{ k }} --n {{ n }} \
+        {{ if target == "sim" { "tcp://127.0.0.1:" + sim_port } else { port } }} \
+        --m {{ m }} --k {{ k }} --n {{ n }} \
         --cfu-word-bits $(({{ cfu_rows }} * {{ cfu_in_width }})) \
         --cfu-store-depth-words {{ cfu_store_depth }} \
         --verify-tolerance {{ tolerance }}
 
-# Small GEMM, then one large enough to need K-tiling (board must be `up`).
+# GEMMs covering K-tiling and M/N tails (board must be `up`).
 gemm-sweep target="hw":
     just gemm {{ target }}
     just gemm {{ target }} {{ cfu_rows }} "$(( ({{ cfu_store_depth }} * 4 / {{ cfu_rows }}) + 128 ))" {{ cfu_cols }}
+    just gemm {{ target }} 20 100 24
+    just gemm {{ target }} 64 256 64
 
 # Compile MNIST and run real test digits on hw or sim, checked against ONNX.
 mnist target="hw" count="10" tolerance="1": mnist-model (_run-deps target)

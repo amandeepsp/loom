@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import struct
+import zlib
 from typing import Protocol
 
 import numpy as np
@@ -131,7 +132,10 @@ class ModelBinaryRuntime:
 
         self.transport.write_mem(input_buf.addr, input_bytes)
         if not self._model_uploaded:
-            self.transport.write_mem(self.model_addr, self.model_blob)
+            self.uploaded_bytes = 0
+            if not self.model_resident():
+                self.transport.write_mem(self.model_addr, self.model_blob)
+                self.uploaded_bytes = len(self.model_blob)
             self._model_uploaded = True
         cycles = self.transport.exec_model(self.model_addr, len(self.model_blob))
         output_bytes = self.transport.read_mem(output_buf.addr, output_buf.size)
@@ -141,6 +145,21 @@ class ModelBinaryRuntime:
             cycles=cycles,
             model_addr=self.model_addr,
         )
+
+    def model_resident(self) -> bool:
+        """True if device memory already holds this exact blob (CRC-32 match).
+
+        Lets repeat runs skip the upload, even across host processes. Transports
+        or firmware without the checksum op report False and the blob uploads.
+        """
+        checksum = getattr(self.transport, "checksum", None)
+        if checksum is None:
+            return False
+        try:
+            resident = checksum(self.model_addr, len(self.model_blob))
+        except Exception:  # older firmware answers unknown_op
+            return False
+        return resident == zlib.crc32(self.model_blob)
 
     def _validate_model_range(self, addr: int, length: int) -> None:
         memory_end = self.artifact.memory_end

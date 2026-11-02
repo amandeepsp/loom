@@ -7,9 +7,6 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
-import re
-import subprocess
-import sys
 from typing import Any
 
 import numpy as np
@@ -189,6 +186,9 @@ def _sweep_rows(
     overlap: list[dict[str, Any]] = []
     bandwidth = SDRAM_INTERFACE_BYTES_PER_CYCLE * clock_hz
     for (m, k, n), variants in sorted(by_shape.items()):
+        if "lmb" in variants:
+            # Schema 2: one compiled-.lmb measurement; no KIR variant pair.
+            variants = {"pipelined": variants["lmb"], "non-pipelined": variants["lmb"]}
         if "pipelined" not in variants or "non-pipelined" not in variants:
             continue
         operations = 2 * m * k * n
@@ -522,69 +522,40 @@ def _dashboard_artifact(
 
 
 def benchmark(*, port: str, output: Path, timeout_s: float) -> None:
+    """Measure on-chip cycles + CFU counters for each GEMM shape via a compiled .lmb."""
+    from tests.test_gemm import run_gemm
+
     results: list[dict[str, Any]] = []
-    cycle_pattern = re.compile(r"=== (non-pipelined|pipelined) ===.*?exec ok, cycles=(\d+)", re.S)
-    for index, (m, k, n) in enumerate(BENCHMARK_CASES, start=1):
-        print(f"[{index}/{len(BENCHMARK_CASES)}] M={m} K={k} N={n}", flush=True)
-        for variant in ("non-pipelined", "pipelined"):
-            perf_transport = SerialTransport(port, timeout_s=timeout_s)
-            perf_transport.perf_counters(reset=True)
-            perf_transport.close()
-
-            command = [
-                sys.executable,
-                "-m",
-                "tests.test_gemm",
-                port,
-                variant,
-                "--m",
-                str(m),
-                "--k",
-                str(k),
-                "--n",
-                str(n),
-                "--verify-tolerance",
-                "1",
-                "--driver-timeout",
-                str(timeout_s),
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=REPO_ROOT,
-                text=True,
-                capture_output=True,
-                timeout=timeout_s,
-            )
-            combined = completed.stdout + completed.stderr
-            if completed.returncode != 0:
-                raise RuntimeError(f"GEMM benchmark failed for {(m, k, n, variant)}:\n{combined}")
-            matches = cycle_pattern.findall(combined)
-            if len(matches) != 1 or matches[0][0] != variant:
-                raise RuntimeError(f"could not parse {variant} for {(m, k, n)}:\n{combined}")
-
-            perf_transport = SerialTransport(port, timeout_s=timeout_s)
-            counters = perf_transport.perf_counters()
-            perf_transport.close()
-            cycles = int(matches[0][1])
+    transport = SerialTransport(port, timeout_s=timeout_s)
+    try:
+        for index, (m, k, n) in enumerate(BENCHMARK_CASES, start=1):
+            r = run_gemm(transport, m, k, n)
+            print(f"[{index}/{len(BENCHMARK_CASES)}] M={m} K={k} N={n} cycles={r.cycles} "
+                  f"max|Δ|={r.max_delta}", flush=True)
+            if r.max_delta > 1:
+                raise RuntimeError(f"GEMM {(m, k, n)} failed verification: max|Δ|={r.max_delta}")
             results.append(
                 {
                     "m": m,
                     "k": k,
                     "n": n,
-                    "variant": variant,
-                    "cycles": cycles,
+                    "variant": "lmb",
+                    "cycles": r.cycles,
                     "verified": True,
                     "verification_tolerance_lsb": 1,
-                    "counters": counters.__dict__,
+                    "counters": r.counters.__dict__ if r.counters else {},
                 }
             )
+    finally:
+        transport.close()
     _write_json(
         output,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "captured_at": _now(),
             "board": "Sipeed Tang Nano 20K",
             "clock_hz": DEFAULT_CLOCK_HZ,
+            "measurement": "compiled .lmb via exec_model; cycles are on-chip mcycle",
             "results": results,
         },
     )

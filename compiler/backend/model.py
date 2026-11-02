@@ -29,6 +29,7 @@ from xdsl.ir import SSAValue
 
 from compiler.frontend import emit_tosa_ir, load_model
 from compiler.frontend.qlinear_mobilenet import (
+    QuantizedGemmPlan,
     QuantizedMobileNetPlan,
     is_qlinear_mobilenet,
     parse_qlinear_mobilenet,
@@ -342,6 +343,74 @@ def compile_onnx_model(
     return replace(compiled, source=source)
 
 
+def compile_gemm(
+    weight: np.ndarray,
+    *,
+    m: int,
+    bias: np.ndarray,
+    multiplier: np.ndarray,
+    shift: np.ndarray,
+    output_zero_point: int = 0,
+    activation_min: int = -128,
+    activation_max: int = 127,
+    memory_base: int = 0x40010100,
+    tile: int = 8,
+    cfu_word_bits: int = 64,
+    cfu_store_depth_words: int = 512,
+    csr_json: str | Path | None = DEFAULT_CSR_JSON,
+) -> CompiledModel:
+    """Compile one int8 GEMM `[m, k] @ weight[k, n]` with explicit epilogue params.
+
+    `shift` is loom's residual right shift (applied after SRDHM), not TOSA's
+    scale32 shift. The result is an ordinary `.lmb`: run it with
+    ModelBinaryRuntime like any model (used by GEMM tests and benchmarks).
+    """
+
+    weight = np.ascontiguousarray(weight, dtype=np.int8)
+    if weight.ndim != 2:
+        raise ValueError("weight must be [k, n]")
+    k, n = weight.shape
+
+    def vec(values: np.ndarray, label: str) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.int32).reshape(-1)
+        if arr.size != n:
+            raise ValueError(f"{label} has {arr.size} entries, expected N={n}")
+        return arr
+
+    layer = QuantizedGemmPlan(
+        name="gemm",
+        kind="gemm",
+        m=m,
+        k=k,
+        n=n,
+        weight=weight,
+        bias=vec(bias, "bias"),
+        multiplier=vec(multiplier, "multiplier"),
+        shift=vec(shift, "shift"),
+        input_zero_point=0,
+        output_zero_point=output_zero_point,
+        activation_min=activation_min,
+        activation_max=activation_max,
+    )
+    plan = QuantizedMobileNetPlan(
+        input_shape=(m, k),
+        output_shape=(m, n),
+        input_scale=1.0,
+        input_zero_point=0,
+        output_scale=1.0,
+        output_zero_point=output_zero_point,
+        layers=(layer,),
+    )
+    return _compile_quantized_mobilenet(
+        plan,
+        memory_base=memory_base,
+        tile=tile,
+        cfu_word_bits=cfu_word_bits,
+        cfu_store_depth_words=cfu_store_depth_words,
+        csr_json=csr_json,
+    )
+
+
 def _compile_onnx_model(
     path: str,
     *,
@@ -604,7 +673,7 @@ def _compile_quantized_mobilenet(
             plan.input_shape,
             scale=plan.input_scale,
             zero_point=plan.input_zero_point,
-            layout="NCHW",
+            layout="NCHW" if len(plan.input_shape) == 4 else "NC",
         ),
         runtime_output=RuntimeTensor(
             final.output_buffer,

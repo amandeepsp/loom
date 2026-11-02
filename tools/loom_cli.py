@@ -174,7 +174,7 @@ def cmd_run(args) -> int:
                     parts.append("FAIL")
             parts.append(f"{result.cycles / 48e6 * 1e3:.1f} ms on-chip")
             if i == 0:
-                parts.append(f"(wall {wall:.1f}s incl. {len(artifact.blob) / 1024:.0f} KiB upload)")
+                parts.append(f"(wall {wall:.1f}s, uploaded {runtime.uploaded_bytes / 1024:.0f} KiB)")
             print("  ".join(parts))
             if args.output:
                 Path(args.output).write_bytes(out.astype(np.int8).tobytes())

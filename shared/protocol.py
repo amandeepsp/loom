@@ -17,9 +17,9 @@ MAGIC_RESP = 0xFC
 OP_PING = 0x00
 OP_READ = 0x10
 OP_WRITE = 0x11
-OP_EXEC = 0x12
 OP_EXEC_MODEL = 0x13
 OP_PERF = 0x14
+OP_CHECKSUM = 0x15
 
 STATUS_OK = 0x00
 WRITE_CHUNK_MAX = 1024
@@ -98,7 +98,7 @@ DEFAULT_BAUD = int(os.environ.get("LOOM_BAUD", "115200"))
 
 
 class BaseTransport:
-    """Common transport logic: chunked mem ops + exec over FramingProtocol."""
+    """Common transport logic: chunked mem ops, model exec, checksum over FramingProtocol."""
 
     def __init__(self) -> None:
         self._proto = FramingProtocol()
@@ -127,8 +127,9 @@ class BaseTransport:
             out.extend(self._request(OP_READ, payload, expected_len=chunk_len))
         return bytes(out)
 
-    def exec_program(self, program: bytes) -> int:
-        data = self._request(OP_EXEC, program, expected_len=4)
+    def checksum(self, addr: int, length: int) -> int:
+        """CRC-32 of device memory (matches zlib.crc32)."""
+        data = self._request(OP_CHECKSUM, struct.pack("<II", addr, length), expected_len=4)
         return struct.unpack("<I", data)[0]
 
     def exec_model(self, addr: int, length: int) -> int:

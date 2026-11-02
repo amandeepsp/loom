@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from compiler import TcpTransport, compile_onnx_model
-from shared.sim_harness import run_gemm_on_sim
+from tests.test_gemm import run_explicit_gemm
 from tests.mnist_model_binary import (
     DEFAULT_ONNX,
     compiled_layer_params,
@@ -48,15 +48,13 @@ def test_sim_gemm(sim_port):
 
     transport = TcpTransport(sim_port, timeout_s=1800)
     try:
-        sim_h = run_gemm_on_sim(
+        sim_h = run_explicit_gemm(
             transport, input_img, w0.T.astype(np.int8),
-            bias=b0, multiplier=m0, shift=s0,
-            output_offset=zp0, activation_min=-128, activation_max=127,
+            bias=b0, multiplier=m0, shift=s0, output_offset=zp0, csr_json=SIM_CSR,
         )
-        sim_out = run_gemm_on_sim(
+        sim_out = run_explicit_gemm(
             transport, sim_h, w1.T.astype(np.int8),
-            bias=b1, multiplier=m1, shift=s1,
-            output_offset=zp1, activation_min=-128, activation_max=127,
+            bias=b1, multiplier=m1, shift=s1, output_offset=zp1, csr_json=SIM_CSR,
         )
     finally:
         transport.close()

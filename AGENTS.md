@@ -8,8 +8,8 @@ Cross-layer stack: Amaranth (RTL), Zig (firmware), Python/xDSL (compiler, host t
 ### Directory Map
 
 - `hardware/` — Amaranth Python RTL: CFU datapath, systolic array, DMA scratchpads, sequencer, epilogue
-- `firmware/` — Zig: bare-metal RISC-V (VexRiscv), UART protocol, `.lmb` model executor, KIR interpreter, CFU/DMA drivers
-- `shared/` — Zig + Python: wire protocol (`protocol.zig`, `protocol.py` incl. Serial/TCP transports), IR definitions (`ir.zig`, `ir.py`)
+- `firmware/` — Zig: bare-metal RISC-V (VexRiscv), UART protocol, `.lmb` model executor, CFU driver
+- `shared/` — Zig + Python: wire protocol (`protocol.zig`, `protocol.py` incl. Serial/TCP transports), layout + epilogue reference helpers
 - `compiler/` — Python: ONNX importer, xDSL/IRDL dialects, rewrite passes, affine lowering, RV32I + CUSTOM0 backend
 - `models/` — Python: int8 MNIST training, static quantization, ONNX export
 - `tests/` — Python: E2E GEMM test harness (`test_gemm.py`), Verilator sim tests (`test_sim.py`)
@@ -107,18 +107,16 @@ port = "/dev/ttyUSB1"    # Serial port for board
 
 When tuning hardware, update Justfile variables — they propagate to both Verilog generation and firmware build.
 
-## IR & Protocol
+## Protocol & Model Binary
 
-- `shared/ir.zig`: Instruction format (load-weight, load-act, tile-mma, store, epilogue params, done).
-  Program header: magic 0x4B495200 ("KIR\0"), version, tensor count, instruction count.
-- `shared/ir.py`: Python IR definitions and `ProgramBuilder` — single source of truth for bytecode format.
-- `shared/protocol.zig`: UART framing (CRC, control sequences).
-- `firmware/interpreter.zig`: Firmware IR interpreter (executes instructions, drives DMA, sequencer).
-- `tools/ir.py`: ~~Legacy IR bytecode builder~~ (deleted; functionality merged into `shared/ir.py`).
+There is one way to run work on the board: compile to a `.lmb` model binary and
+call `exec_model`. Standalone GEMMs use `compiler.compile_gemm` (see
+`tests/test_gemm.py`), so tests and benchmarks exercise the production path.
+
+- `shared/protocol.zig` / `shared/protocol.py`: UART framing and ops — `ping`, `read`, `write`, `exec_model`, `perf` (CFU counters), `checksum` (CRC-32 of a memory range, used to skip re-uploading a resident model).
 - `firmware/model.zig`: `.lmb` model-binary parser/executor (loads constants, calls generated RV32I functions).
+- `compiler/backend/runtime.py`: host-side upload/exec; skips the blob upload when the device CRC matches.
 - `tests/test_sim.py`: pytest-based Verilator sim tests (layer-by-layer GEMM, full ONNX→model-binary pipeline).
-
-Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, and `firmware/interpreter.zig`.
 
 Changing the `.lmb` model binary requires sync across `compiler/backend/model.py`, `compiler/backend/runtime.py`, `firmware/model.zig`, and `tests/test_reference.py` / `tests/test_model_runtime.py`.
 
@@ -143,7 +141,7 @@ The VexRiscv target has no hardware floating point. Generated firmware/model cod
 
 ### Datapath Flow
 
-Firmware receives commands over UART. KIR bytecode is interpreted directly; `.lmb` model binaries load constants, run generated RV32I functions on the VexRiscv CPU, and issue CUSTOM0 instructions for GEMM. The CFU uses DMA readers to fill double-buffered scratchpads, the sequencer drives the output-stationary systolic array, and the epilogue requantizes int32 accumulators to int8 results.
+Firmware receives commands over UART. `.lmb` model binaries load constants, run generated RV32I functions on the VexRiscv CPU, and issue CUSTOM0 instructions for GEMM. The CFU uses DMA readers to fill double-buffered scratchpads, the sequencer drives the output-stationary systolic array, and the epilogue requantizes int32 accumulators to int8 results.
 
 ### Code Generation
 
@@ -199,33 +197,15 @@ Firmware has `link.sendDebug(value: u32)` in `firmware/link.zig` that prints `DE
 
 ### Debug Buffer in Errors
 
-`firmware/interpreter.zig` populates a debug buffer passed to `execute()`. On error, this buffer is included in the response payload. Format:
-- `[0] = payload_len`
-- `[1] = remaining bytes`
-- `[2] = num_instructions or context-specific`
-- `[3] = instruction index or error context`
-- `[4+] = opcode or additional data`
-
-Parse the debug payload in the `ProtocolError` message when seeing errors.
+On `exec_model` errors, `firmware/model.zig` returns `model.debug_buf` in the
+response payload (stage code + offset); it appears in the `ProtocolError`
+message on the host.
 
 ### Common Firmware Errors
 
-- **`BadMagic`** → IR program header mismatch (wrong magic or version)
-- **`BadPayloadLen`** → Byte counting error in `readInstruction` (was using wrong subtraction)
-- **`BadAddress`** → Tensor descriptor validation failed (dtype, bounds, offset out of range, etc.)
-- **`IllegalInstruction`** → Unknown opcode in IR program
-
-### Common Fixes Applied
-
-1. **`tile_store` field order**: Python emitted `n_offset` before `m_offset`, but firmware struct expects `m_offset` first. Fixed in `shared/ir.py`.
-2. **Input `k_offset`**: For `[K, tile]` layout, k_offset should be `k_base * tile` (byte offset within M-tile), not `k_base * 4`.
-3. **Input tensor stride**: Should be `K * tile` bytes (size of one M-tile), matching the `[K, tile]` layout.
-4. **Byte counting**: `readInstruction` was subtracting `@sizeOf(T)` instead of `@sizeOf(T) - 1`.
-5. **Software N tiling**: Added N-tiling loop when N > 8, with proper `n_offset` and `n_count` for all operations.
-
-### Verify IR Struct Alignment
-
-Python `tile_store(m_offset, n_offset)` emits in the same order as Zig `TileStore{m_offset, n_offset}` expects. Always verify byte order matches between `shared/ir.py` and `shared/ir.zig`.
+- **`BadMagic`** → `.lmb` header magic/version mismatch (stale binary or wrong file)
+- **`BadPayloadLen`** → malformed section table, or request payload size mismatch
+- **`BadAddress`** → buffer/model range outside runtime RAM (`memory.rangeValid`)
 
 ## Debugging Hardware
 

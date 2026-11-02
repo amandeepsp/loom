@@ -28,7 +28,7 @@ GEMM kernels.
 | Directory   | Language        | Purpose                                                  |
 |-------------|-----------------|----------------------------------------------------------|
 | `hardware/` | Python/Amaranth | CFU RTL — systolic array, DMA scratchpads, sequencer, epilogue |
-| `firmware/` | Zig             | Bare-metal RISC-V firmware: UART protocol, `.lmb` executor, KIR interpreter, DMA/CFU drivers |
+| `firmware/` | Zig             | Bare-metal RISC-V firmware: UART protocol, `.lmb` executor, CFU driver |
 | `shared/`   | Zig + Python    | Wire protocol + Serial/TCP transports, IR definitions (shared by firmware and Python) |
 | `compiler/` | Python          | xDSL frontend/dialects/rewrites, affine lowering, RV32I + CUSTOM0 backend, model runtime |
 | `models/`   | Python          | Int8 MNIST training + static quantization (ONNX export)  |
@@ -96,8 +96,8 @@ just showcase-pngs
 
 See [`analytics/README.md`](analytics/README.md) for metric definitions and the
 portable HTML build command. Hardware counters separate array-active, DMA, and
-concurrent overlap cycles from complete compiled-model time; streamed KIR is
-kept separate because its `mcycle` measurement includes UART delivery. The
+concurrent overlap cycles from complete compiled-model time. GEMM sweeps run
+as compiled `.lmb` binaries, so their `mcycle` counts are on-chip only. The
 Gowin nextpnr backend does not implement native wire/pip SVG graphics, so the
 routing figure uses its routed JSON attributes rather than implying that
 `--routed-svg` contains connections.

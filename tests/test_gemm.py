@@ -1,171 +1,168 @@
 #!/usr/bin/env -S uv run python
-"""GEMM end-to-end tests: non-pipelined and pipelined variants.
+"""End-to-end GEMM on the board or Verilator sim, via a compiled `.lmb`.
 
-Usage:
-    loom.e2e-gemm /dev/ttyUSB1 non-pipelined
-    loom.e2e-gemm /dev/ttyUSB1 pipelined
-    loom.e2e-gemm /dev/ttyUSB1 all
+    python -m tests.test_gemm /dev/ttyUSB1 --m 8 --k 384 --n 8
+    python -m tests.test_gemm tcp://127.0.0.1:21450 --m 20 --k 100 --n 24
+
+The GEMM is compiled with `compiler.compile_gemm` into the same model-binary
+format real models use, so this exercises the production path (affine
+K-tiling with DMA/compute overlap, M/N tails, epilogue) and reports on-chip
+cycles without UART streaming in the measurement.
+
+Epilogue parameters are chosen per column so outputs span the int8 range
+(random bias, non-zero output offset, ReLU-style lower clamp); trivially
+small scales would make nearly every output 0 and hide datapath bugs.
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
 import os
-import pathlib
-import struct
-import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
-from shared.ir import (
-    build_gemm_program,
-    plan_memory,
-)
-from shared.layout import align_up, pack_input_tiles, pack_weight_rows
-from shared.protocol import SerialTransport, TcpTransport
-from shared.reference import INT32_MAX, INT32_MIN, ref_rdbpot, ref_srdhm
+from compiler import compile_gemm
+from compiler.backend.runtime import ModelBinaryArtifact, ModelBinaryRuntime
+from compiler.quant_utils import quantize_multiplier_less_than_one
+from shared.protocol import PerfCounters, SerialTransport, TcpTransport
+from shared.reference import cpu_requantize
 
 log = logging.getLogger("loom.e2e")
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DRIVER_BIN = REPO_ROOT / "zig-out" / "bin" / "driver"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+HW_CSR = REPO_ROOT / "build/sipeed_tang_nano_20k/csr.json"
+SIM_CSR = REPO_ROOT / "build/sim/csr.json"
 DEFAULT_CFU_WORD_BITS = int(os.environ.get("LOOM_CFU_WORD_BITS", "64"))
-DEFAULT_CFU_STORE_DEPTH_WORDS = int(
-    os.environ.get("LOOM_CFU_STORE_DEPTH_WORDS", "512")
-)
-DEFAULT_DRIVER_TIMEOUT_S = float(os.environ.get("LOOM_DRIVER_TIMEOUT_S", "120"))
-TENSOR_POOL_BASE = 0x40010000
-MEM_ALIGN = 32
+DEFAULT_CFU_STORE_DEPTH_WORDS = int(os.environ.get("LOOM_CFU_STORE_DEPTH_WORDS", "512"))
 
 
-def run(cmd: list[str], *, timeout_s: float) -> str:
-    log.debug("driver cmd: %s", " ".join(cmd))
-    try:
-        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        log.error("driver subprocess timed out after %ds: %s", timeout_s, " ".join(cmd))
-        raise SystemExit(124) from exc
-    if proc.returncode != 0:
-        log.error("driver failed with code %d", proc.returncode)
-        log.error("stderr: %s", proc.stderr)
-        raise SystemExit(proc.returncode)
-    return proc.stdout + proc.stderr
+@dataclass(frozen=True)
+class GemmCase:
+    input: np.ndarray        # [m, k] int8
+    weight: np.ndarray       # [k, n] int8
+    bias: np.ndarray         # [n] int32
+    multiplier: np.ndarray   # [n] int32
+    shift: np.ndarray        # [n] int32, residual shift after SRDHM
+    output_zero_point: int
+    activation_min: int
+    activation_max: int
+
+    def expected(self) -> np.ndarray:
+        acc = self.input.astype(np.int32) @ self.weight.astype(np.int32)
+        return cpu_requantize(
+            acc, self.bias, self.multiplier, self.shift,
+            self.output_zero_point, self.activation_min, self.activation_max,
+        )
 
 
-def pack_i8(arr: np.ndarray) -> bytes:
-    return arr.astype(np.int8).tobytes()
+@dataclass
+class GemmResult:
+    m: int
+    k: int
+    n: int
+    cycles: int
+    max_delta: int
+    exact: int
+    total: int
+    counters: PerfCounters | None = None
+    nonzero_outputs: int = 0
+    lmb_bytes: int = 0
+    extra: dict = field(default_factory=dict)
+
+    @property
+    def gops(self) -> float:
+        return 2 * self.m * self.k * self.n * 48e6 / self.cycles / 1e9
 
 
-def pack_i32(arr: np.ndarray) -> bytes:
-    return arr.astype(np.int32).tobytes()
+def make_case(m: int, k: int, n: int, seed: int = 0) -> GemmCase:
+    rng = np.random.default_rng(seed)
+    a = rng.integers(-128, 128, size=(m, k), dtype=np.int8)
+    w = rng.integers(-128, 128, size=(k, n), dtype=np.int8)
+    acc = a.astype(np.int64) @ w.astype(np.int64)
+    bias = rng.integers(-2000, 2000, size=n).astype(np.int32)
+    # Map roughly +/-3 sigma of each column onto +/-100 output steps.
+    spread = np.maximum(acc.std(axis=0), 1.0) * 3
+    multiplier = np.empty(n, dtype=np.int32)
+    shift = np.empty(n, dtype=np.int32)
+    for col in range(n):
+        mult, tosa_shift = quantize_multiplier_less_than_one(min(100.0 / spread[col], 0.999))
+        multiplier[col], shift[col] = int(mult), int(tosa_shift) - 31
+    return GemmCase(a, w, bias, multiplier, shift,
+                    output_zero_point=-10, activation_min=-60, activation_max=127)
 
 
-def compute_expected(
-    input_matrix: np.ndarray,
-    weight_matrix: np.ndarray,
+def run_gemm(
+    transport,
+    m: int,
+    k: int,
+    n: int,
+    *,
+    seed: int = 0,
+    csr_json: Path = HW_CSR,
+    cfu_word_bits: int = DEFAULT_CFU_WORD_BITS,
+    cfu_store_depth_words: int = DEFAULT_CFU_STORE_DEPTH_WORDS,
+    read_counters: bool = True,
+) -> GemmResult:
+    """Compile, upload, and run one GEMM; return cycles + verification stats."""
+
+    case = make_case(m, k, n, seed)
+    compiled = compile_gemm(
+        case.weight, m=m, bias=case.bias, multiplier=case.multiplier, shift=case.shift,
+        output_zero_point=case.output_zero_point,
+        activation_min=case.activation_min, activation_max=case.activation_max,
+        tile=cfu_word_bits // 8, cfu_word_bits=cfu_word_bits,
+        cfu_store_depth_words=cfu_store_depth_words, csr_json=csr_json,
+    )
+    artifact = ModelBinaryArtifact.from_bytes(compiled.to_bytes())
+    runtime = ModelBinaryRuntime(artifact, transport)
+
+    if read_counters:
+        transport.perf_counters(reset=True)
+    run = runtime.run_quantized(case.input)
+    counters = transport.perf_counters() if read_counters else None
+
+    expected = case.expected()
+    delta = np.abs(run.output.astype(np.int32) - expected.astype(np.int32))
+    return GemmResult(
+        m=m, k=k, n=n,
+        cycles=run.cycles,
+        max_delta=int(delta.max()),
+        exact=int((delta == 0).sum()),
+        total=int(delta.size),
+        counters=counters,
+        nonzero_outputs=int((expected != case.output_zero_point).sum()),
+        lmb_bytes=len(artifact.blob),
+    )
+
+
+def run_explicit_gemm(
+    transport,
+    lhs: np.ndarray,
+    rhs: np.ndarray,
+    *,
     bias: np.ndarray,
     multiplier: np.ndarray,
     shift: np.ndarray,
+    output_offset: int = 0,
+    activation_min: int = -128,
+    activation_max: int = 127,
+    csr_json: Path = HW_CSR,
 ) -> np.ndarray:
-    """GEMM with SRDHM + RDBPOT epilogue."""
-    acc = input_matrix.astype(np.int32) @ weight_matrix.astype(np.int32)
-    m, n = acc.shape
-    out = np.empty((m, n), dtype=np.int8)
-    for col in range(n):
-        b = int(bias[col])
-        mult = int(multiplier[col])
-        sh = int(shift[col])
-        for row in range(m):
-            val = int(acc[row, col]) + b
-            val = ref_srdhm(val, mult)
-            val = ref_rdbpot(val, sh)
-            out[row, col] = max(-128, min(127, val))
-    return out
+    """Run `lhs[m, k] @ rhs[k, n]` with caller-supplied epilogue params; return int8 [m, n]."""
 
-
-def generate_input_matrix(m: int, k: int, seed: int = 42) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    return rng.integers(-128, 128, size=(m, k), dtype=np.int8)
-
-
-def generate_weight_matrix(k: int, n: int, seed: int = 137) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    return rng.integers(-128, 128, size=(k, n), dtype=np.int8)
-
-
-def generate_epilogue_params(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Simple params: bias=0, mult=256, shift=0."""
-    bias = np.zeros(n, dtype=np.int32)
-    multiplier = np.ones(n, dtype=np.int32) * 256
-    shift = np.zeros(n, dtype=np.int32)
-    return bias, multiplier, shift
-
-
-def verify_gemm_output(
-    expected: bytes,
-    actual: bytes,
-    m: int,
-    n: int,
-    tolerance: int,
-) -> bool:
-    """Verify GEMM output against expected values."""
-    if len(expected) != len(actual):
-        log.error(
-            "output size mismatch: expected %d, got %d", len(expected), len(actual)
-        )
-        return False
-    if tolerance < 0 or tolerance > 127:
-        raise ValueError("verify tolerance must be in 0..127")
-
-    exp_arr = np.frombuffer(expected, dtype=np.int8).astype(np.int32)
-    act_arr = np.frombuffer(actual, dtype=np.int8).astype(np.int32)
-    delta = np.abs(exp_arr - act_arr)
-
-    exact = int(np.sum(delta == 0))
-    off_by_one = int(np.sum(delta == 1))
-    max_abs = int(delta.max())
-    total = len(expected)
-
-    log.info(
-        "verify: %d/%d exact, %d cells with |Δ|=1, max |Δ|=%d, tolerance=%d",
-        exact,
-        total,
-        off_by_one,
-        max_abs,
-        tolerance,
+    compiled = compile_gemm(
+        rhs, m=lhs.shape[0], bias=bias, multiplier=multiplier, shift=shift,
+        output_zero_point=output_offset,
+        activation_min=activation_min, activation_max=activation_max, csr_json=csr_json,
     )
-
-    if max_abs <= tolerance:
-        if max_abs == 0:
-            log.info("output verification PASSED (exact match)")
-        else:
-            log.info("output verification PASSED (tolerance=%d)", tolerance)
-        return True
-
-    fail_mask = delta > tolerance
-    fail_indices = np.where(fail_mask)[0].tolist()
-    log.error("FAILED: %d/%d cells exceed tolerance", len(fail_indices), total)
-    for i in fail_indices[:16]:
-        row, col = divmod(i, n)
-        es = int(exp_arr[i])
-        ac = int(act_arr[i])
-        log.info(
-            "  mismatch (%d,%d): expected %d, got %d, |Δ|=%d",
-            row,
-            col,
-            es,
-            ac,
-            abs(es - ac),
-        )
-    if len(fail_indices) > 16:
-        log.info("  ... and %d more", len(fail_indices) - 16)
-    if off_by_one > 0 and max_abs == 1:
-        log.info("hint: failures are all |Δ|=1 — typical of rounding differences")
-
-    return False
+    runtime = ModelBinaryRuntime(ModelBinaryArtifact.from_bytes(compiled.to_bytes()), transport)
+    return runtime.run_quantized(np.ascontiguousarray(lhs, dtype=np.int8)).output
 
 
 def open_transport(port: str, timeout_s: float):
-    """Return a TcpTransport or SerialTransport depending on port format."""
     if port.startswith("tcp://"):
         return TcpTransport(port, timeout_s=timeout_s)
     return SerialTransport(port, timeout_s=timeout_s)
@@ -173,134 +170,39 @@ def open_transport(port: str, timeout_s: float):
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(
-        description="Run GEMM end-to-end test against loom board.",
-    )
-    parser.add_argument("port", default="/dev/ttyUSB1")
-    parser.add_argument(
-        "variant",
-        choices=["non-pipelined", "pipelined", "all"],
-        default="all",
-    )
-    parser.add_argument("--driver", default=str(DRIVER_BIN))
+    parser = argparse.ArgumentParser(description="Run a GEMM end-to-end on the board or sim.")
+    parser.add_argument("port", help="serial device or tcp://host:port")
     parser.add_argument("--m", type=int, default=8)
     parser.add_argument("--k", type=int, default=8)
     parser.add_argument("--n", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--csr-json", type=Path, default=None,
+                        help="default: sim csr for tcp:// ports, hw csr otherwise")
     parser.add_argument("--cfu-word-bits", type=int, default=DEFAULT_CFU_WORD_BITS)
-    parser.add_argument(
-        "--cfu-store-depth-words", type=int, default=DEFAULT_CFU_STORE_DEPTH_WORDS
-    )
-    parser.add_argument(
-        "--driver-timeout", type=float, default=DEFAULT_DRIVER_TIMEOUT_S
-    )
-    parser.add_argument("--no-verify", action="store_true")
+    parser.add_argument("--cfu-store-depth-words", type=int, default=DEFAULT_CFU_STORE_DEPTH_WORDS)
+    parser.add_argument("--timeout", "--driver-timeout", dest="timeout", type=float, default=600)
     parser.add_argument("--verify-tolerance", type=int, default=0)
-    parser.add_argument("-v", "--verbose", action="count", default=0)
     args = parser.parse_args()
 
-    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
-
-    driver = pathlib.Path(args.driver)
-    if not args.port.startswith("tcp://") and not driver.is_file():
-        log.error("missing driver: %s", driver)
-        raise SystemExit(1)
-
-    m, k, n = args.m, args.k, args.n
-    tile = args.cfu_word_bits // 8
-    cfu_word_bits = args.cfu_word_bits
-    cfu_store_depth_words = args.cfu_store_depth_words
-
-    log.info("variant=%s M=%d K=%d N=%d tile=%d", args.variant, m, k, n, tile)
-
-    input_matrix = generate_input_matrix(m, k)
-    weight_matrix = generate_weight_matrix(k, n)
-    bias, multiplier, shift = generate_epilogue_params(n)
-
-    input_data = pack_input_tiles(input_matrix, tile)
-    weight_data = pack_weight_rows(weight_matrix)
-    bias_data = pack_i32(bias)
-    mult_data = pack_i32(multiplier)
-    shift_data = pack_i32(shift)
-
-    output_size = m * n
-    input_addr = TENSOR_POOL_BASE + 256
-    weight_addr = input_addr + len(input_data)
-    output_addr = weight_addr + len(weight_data)
-    bias_addr = output_addr + output_size
-    mult_addr = bias_addr + n * 4
-    shift_addr = mult_addr + n * 4
-
-    layout = plan_memory(
-        input_addr=input_addr,
-        weight_addr=weight_addr,
-        output_addr=output_addr,
-        bias_addr=bias_addr,
-        mult_addr=mult_addr,
-        shift_addr=shift_addr,
-    )
-
-    expected = compute_expected(input_matrix, weight_matrix, bias, multiplier, shift)
-    expected_bytes = np.ascontiguousarray(expected).astype(np.int8).tobytes()
-
-    to = args.driver_timeout
-    transport = open_transport(args.port, to)
-
-    log.info("uploading test data...")
-    transport.write_mem(input_addr, input_data)
-    transport.write_mem(weight_addr, weight_data)
-    transport.write_mem(bias_addr, bias_data)
-    transport.write_mem(mult_addr, mult_data)
-    transport.write_mem(shift_addr, shift_data)
-
-    if args.variant == "all":
-        variants = ["non-pipelined", "pipelined"]
-    else:
-        variants = [args.variant]
-    all_passed = True
-
-    for variant in variants:
-        log.info("=== %s ===", variant)
-
-        if variant == "non-pipelined":
-            k_tile = cfu_store_depth_words // (cfu_word_bits // 32)
-        else:
-            k_tile = None
-
-        program = build_gemm_program(
-            layout=layout,
-            m=m,
-            k=k,
-            n=n,
-            tile=tile,
-            act_tensor_id=0,
-            wgt_tensor_id=1,
-            out_tensor_id=2,
-            bias_id=3,
-            mult_id=4,
-            shift_id=5,
-            cfu_word_bits=cfu_word_bits,
-            cfu_store_depth_words=cfu_store_depth_words,
-            k_tile=k_tile,
+    csr = args.csr_json or (SIM_CSR if args.port.startswith("tcp://") else HW_CSR)
+    transport = open_transport(args.port, args.timeout)
+    try:
+        r = run_gemm(
+            transport, args.m, args.k, args.n, seed=args.seed, csr_json=csr,
+            cfu_word_bits=args.cfu_word_bits, cfu_store_depth_words=args.cfu_store_depth_words,
         )
+    finally:
+        transport.close()
 
-        log.debug("program (%d bytes): %s", len(program), program.hex())
-
-        cycles = transport.exec_program(program)
-        log.info("exec ok, cycles=%d", cycles)
-
-        if args.no_verify:
-            log.info("%s: PASSED (no verify)", variant)
-            continue
-
-        actual = transport.read_mem(output_addr, output_size)
-
-        if verify_gemm_output(expected_bytes, actual, m, n, args.verify_tolerance):
-            log.info("%s: PASSED", variant)
-        else:
-            all_passed = False
-
-    transport.close()
-    return 0 if all_passed else 1
+    log.info("M=%d K=%d N=%d  lmb=%d bytes", r.m, r.k, r.n, r.lmb_bytes)
+    log.info("cycles=%d (%.3f GOPS on-chip)  counters=%s", r.cycles, r.gops, r.counters)
+    log.info("verify: %d/%d exact, max|Δ|=%d, %d/%d outputs away from zero point",
+             r.exact, r.total, r.max_delta, r.nonzero_outputs, r.total)
+    if r.max_delta > args.verify_tolerance:
+        log.error("FAILED: max|Δ|=%d > tolerance %d", r.max_delta, args.verify_tolerance)
+        return 1
+    log.info("PASSED")
+    return 0
 
 
 if __name__ == "__main__":

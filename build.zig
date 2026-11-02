@@ -6,9 +6,6 @@ pub fn build(b: *std.Build) void {
     const protocol = b.createModule(.{
         .root_source_file = b.path("shared/protocol.zig"),
     });
-    const ir = b.createModule(.{
-        .root_source_file = b.path("shared/ir.zig"),
-    });
 
     // Config Options
     const cfu_rows = b.option(
@@ -26,13 +23,11 @@ pub fn build(b: *std.Build) void {
         "cfu-store-depth",
         "CFU scratchpad depth in words (default: 512)",
     ) orelse 512;
-    const debug_info = b.option(bool, "debug-info", "Should include debug info") orelse false;
 
     const config = b.addOptions();
     config.addOption(usize, "cfu_rows", cfu_rows);
     config.addOption(usize, "cfu_cols", cfu_cols);
     config.addOption(usize, "cfu_store_depth", cfu_store_depth);
-    config.addOption(bool, "debug_info", debug_info);
 
     // Host-side unit tests for firmware modules
     const host_target = b.standardTargetOptions(.{});
@@ -108,7 +103,6 @@ pub fn build(b: *std.Build) void {
     });
     fw_mod.addImport("csr", csr_options.createModule());
     fw_mod.addImport("protocol", protocol);
-    fw_mod.addImport("ir", ir);
     fw_mod.addImport("config", config.createModule());
 
     const fw_exe = b.addExecutable(.{

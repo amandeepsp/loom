@@ -9,9 +9,10 @@ pub const OpType = enum(u8) {
     ping = 0x00,
     read = 0x10,
     write = 0x11,
-    exec = 0x12,
+    // 0x12 was `exec` (streamed KIR bytecode), removed in favour of `.lmb` models.
     exec_model = 0x13,
     perf = 0x14,
+    checksum = 0x15,
     _,
 };
 
@@ -99,6 +100,15 @@ pub const ReadMem = struct {
 };
 
 pub const ExecModel = struct {
+    pub const Req = extern struct {
+        addr: u32,
+        len: u32,
+    };
+};
+
+/// CRC-32 (IEEE, same as zlib.crc32) of a memory range; lets the host skip
+/// re-uploading a model binary that is already resident.
+pub const Checksum = struct {
     pub const Req = extern struct {
         addr: u32,
         len: u32,

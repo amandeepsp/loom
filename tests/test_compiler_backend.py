@@ -890,9 +890,11 @@ def test_encoded_k_loop_preserves_wait_skip_and_dynamic_flags():
 def test_generated_riscv_kernels_are_looped_not_unrolled_blobs():
     compiled = compile_onnx_model("models/out/mnist_int8.onnx")
 
+    # Kernels loop over tiles (only the fixed 8x8 tile store is unrolled) and
+    # must stay well inside the 4 KiB direct-mapped icache.
     code_sizes = [len(kernel.riscv_code) for kernel in compiled.kernels]
-    assert code_sizes[0] < 2048
-    assert code_sizes[1] < 2048
+    assert code_sizes[0] < 3072
+    assert code_sizes[1] < 3072
 
     for kernel in compiled.kernels:
         words = [

@@ -184,12 +184,61 @@ def _store_result_ops(
     constant), so each element is addi + READ_RESULT + sb with an immediate
     offset instead of re-deriving its address from scratch.
     """
+    spec = ctx.spec
+    if (spec.tile - 1) * spec.n + n_count <= 2047:
+        return _store_result_tile_unrolled(ctx, n_count, m_iv, n_iv)
     return _for_ops(
         0,
         ctx.spec.tile,
         1,
         lambda row_iv: _store_result_row(ctx, n_count, m_iv, n_iv, row_iv),
     )
+
+
+def _store_result_tile_unrolled(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    m_iv: SSAValue,
+    n_iv: SSAValue,
+) -> list[Operation]:
+    """Whole-tile store from one base register (rows and columns unrolled).
+
+    Row-major: element (r, col) is at base + r*N + col, base = out + m*N + n.
+    Packed (F1): element (r, col) is at base + col*tile + r, base = packed +
+    m*N + n*tile. Offsets fit sb's 12-bit immediate; result indices
+    r*tile + col are constants. Optional store LUT as in the row variants.
+    """
+    spec = ctx.spec
+    out: list[Operation] = []
+    m_ops, m_off = _mul_const(m_iv, spec.n)
+    if spec.packed_output_addr:
+        n_ops, n_off = _mul_const(n_iv, spec.tile)
+        base_addr = spec.packed_output_addr
+    else:
+        n_ops, n_off = [], n_iv
+        base_addr = spec.output_addr
+    off = riscv.AddOp(m_off, n_off)
+    base0 = rv32.LiOp(base_addr)
+    base = riscv.AddOp(base0.rd, off.rd)
+    out += [*m_ops, *n_ops, off, base0, base]
+    lut = None
+    if spec.store_lut_addr:
+        lut = rv32.LiOp(spec.store_lut_addr + 128)
+        out.append(lut)
+    for r in range(spec.tile):
+        for col in range(n_count):
+            index = rv32.LiOp(r * spec.tile + col)
+            read = loom_riscv.ReadResultOp(index.rd)
+            out += [index, read]
+            value = read.rd
+            if lut is not None:
+                addr = riscv.AddOp(lut.rd, read.rd)
+                mapped = riscv.LbuOp(addr.rd, 0)
+                out += [addr, mapped]
+                value = mapped.rd
+            imm = col * spec.tile + r if spec.packed_output_addr else r * spec.n + col
+            out.append(riscv.SbOp(base.rd, value, imm))
+    return out
 
 
 def _store_result_row(

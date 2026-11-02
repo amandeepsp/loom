@@ -3,14 +3,13 @@
 ## Project Overview
 
 **loom** — RISC-V Custom Function Unit (CFU) accelerator for ML on FPGA (Tang Nano 20K).
-Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python/xDSL (compiler + SoC integration).
+Cross-layer stack: Amaranth (RTL), Zig (firmware), Python/xDSL (compiler, host transport, SoC integration).
 
 ### Directory Map
 
 - `hardware/` — Amaranth Python RTL: CFU datapath, systolic array, DMA scratchpads, sequencer, epilogue
 - `firmware/` — Zig: bare-metal RISC-V (VexRiscv), UART protocol, `.lmb` model executor, KIR interpreter, CFU/DMA drivers
-- `shared/` — Zig + Python: wire protocol (`protocol.zig`), IR definitions (`ir.zig`, `ir.py`)
-- `host/` — Zig: native driver + C API (`libloom.so`) for serial communication with board
+- `shared/` — Zig + Python: wire protocol (`protocol.zig`, `protocol.py` incl. Serial/TCP transports), IR definitions (`ir.zig`, `ir.py`)
 - `compiler/` — Python: ONNX importer, xDSL/IRDL dialects, rewrite passes, affine lowering, RV32I + CUSTOM0 backend
 - `models/` — Python: int8 MNIST training, static quantization, ONNX export
 - `tests/` — Python: E2E GEMM test harness (`test_gemm.py`), Verilator sim tests (`test_sim.py`)
@@ -20,44 +19,24 @@ Cross-layer stack: Amaranth (RTL), Zig (firmware + driver), Python/xDSL (compile
 
 ## Essential Commands
 
-### Hardware RTL (Python/Amaranth)
+### Build and board
+
+Run/test recipes take `target=hw|sim` (default `hw`). Set `LOOM_PORT` and
+`OSS_CAD_BIN` in the environment or a `.env` file if not the defaults.
 
 ```sh
-# Regenerate CFU Verilog from Amaranth (always before hw-build)
-just verilog
-
-# Full flow: Verilog → LiteX SoC → bitstream → flash, can take a very long time
-just hw-all
-
-# Just build/flash without firmware upload
-just hw-build
-just hw-flash
-
-# Reset FPGA board
-just hw-reset
+just verilog          # regenerate top.v from Amaranth
+just soc              # verilog → LiteX SoC → bitstream (slow; writes csr.json)
+just flash            # write bitstream to SPI flash
+just reset            # reload FPGA from flash
+just firmware         # build hw firmware (needs csr.json from `just soc`)
+just up               # build firmware, reset, serial-boot it, ping
+just all              # soc → flash → up
+just gemm             # E2E GEMM on the board (needs `just up`)
+just gemm-sweep       # small GEMM + K-tiled GEMM
 ```
 
-**Required tools on PATH:** `oss-cad-suite/bin` (Yosys, nextpnr, openFPGALoader).
-Set `oss_cad_bin` variable in Justfile if not default.
-
-### Firmware (Zig → RISC-V binary)
-
-```sh
-# Build firmware (requires prior hw-build to generate build/sipeed_tang_nano_20k/csr.json)
-just hw-firmware
-
-# Upload to running board (blocks waiting for response)
-just hw-upload
-
-# Upload + auto-release serial port when transfer completes
-just hw-upload-once
-
-# End-to-end GEMM test against board with firmware running
-just hw-gemm
-```
-
-**Build requirement:** `hw-build` must run first (generates CSR register addresses in `csr.json`).
-Firmware build via `zig build firmware -Dbuild-dir=build/sipeed_tang_nano_20k` will fail until SoC is built.
+**Required tools:** `oss-cad-suite/bin` (Yosys, nextpnr, openFPGALoader), Zig 0.17, `riscv64-*-objcopy`.
 
 ### Tests (Python/pytest via uv)
 
@@ -68,13 +47,16 @@ uv run pytest hardware
 # Run single test file
 uv run pytest hardware/systolic/test_*.py -v
 
-# Sim regression (Verilator + firmware, no board)
-just sim-gemm                      # 8×8×8 default
-just sim-gemm m=4 k=16 n=4         # custom sizes
+# All offline tests (pytest + zig host tests)
+just test
 
-# Sim full MNIST model-binary path (Verilator + firmware)
-just sim-mnist
-just sim-mnist-artifact
+# Sim regression (Verilator + firmware, no board)
+just gemm sim                      # 8×8×8 default
+just gemm sim 4 16 4               # custom m k n
+
+# Full MNIST model-binary path
+just mnist sim
+just mnist                         # on the board
 ```
 
 Tests live in: `hardware/systolic/`, `hardware/memory/`, `hardware/epilogue/`, and `tests/`.
@@ -112,10 +94,10 @@ uv run loom-run-model build/mnist.lmb build/mnist_input_i8.bin \
 
 When making changes:
 
-1. **If RTL changes:** `just verilog` → `just hw-build` (generates `top.v` and CSR addresses)
-2. **If firmware changes:** `zig build firmware -Dbuild-dir=build/sipeed_tang_nano_20k` (depends on CSR from step 1)
+1. **If RTL changes:** `just soc` (regenerates `top.v` and CSR addresses), then `just flash`
+2. **If firmware changes:** `just up` (rebuilds firmware against `csr.json` and boots it)
 3. **If hardware tests fail:** `uv run pytest hardware -v` (simulation, no board needed)
-4. **If e2e fails:** `just hw-reset && just hw-upload-once && just hw-gemm`
+4. **If e2e fails:** `just up && just gemm`
 
 Missing any earlier step causes cryptic build failures (missing csr.json, undefined CSR addresses).
 
@@ -140,14 +122,12 @@ When tuning hardware, update Justfile variables — they propagate to both Veril
   Program header: magic 0x4B495200 ("KIR\0"), version, tensor count, instruction count.
 - `shared/ir.py`: Python IR definitions and `ProgramBuilder` — single source of truth for bytecode format.
 - `shared/protocol.zig`: UART framing (CRC, control sequences).
-- `host/driver.zig`: Host-side serial communication + CFU instruction dispatch.
-- `host/c_api.zig`: C FFI surface (`libloom.so`) — `loom_open`, `loom_exec`, `loom_write_mem`, etc.
 - `firmware/interpreter.zig`: Firmware IR interpreter (executes instructions, drives DMA, sequencer).
 - `tools/ir.py`: ~~Legacy IR bytecode builder~~ (deleted; functionality merged into `shared/ir.py`).
 - `firmware/model.zig`: `.lmb` model-binary parser/executor (loads constants, calls generated RV32I functions).
 - `tests/test_sim.py`: pytest-based Verilator sim tests (layer-by-layer GEMM, full ONNX→model-binary pipeline).
 
-Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, `firmware/interpreter.zig`, `host/driver.zig`.
+Changing IR requires sync across `shared/ir.zig`, `shared/ir.py`, and `firmware/interpreter.zig`.
 
 Changing the `.lmb` model binary requires sync across `compiler/backend/model.py`, `compiler/backend/runtime.py`, `firmware/model.zig`, and host/transport tests.
 
@@ -205,18 +185,18 @@ uv run litex_term /dev/ttyUSB1  # not litex_term directly
 ## Zig Build System
 
 - **Firmware target:** riscv32, bare-metal, no float, no atomics.
-- **Host driver target:** native (x86_64 Linux).
+- **Host tests:** `zig build test` runs `firmware/model.zig` unit tests natively.
 - **Linker script:** `firmware/linker.ld` (VexRISCV memory map).
 - **Build options:** `-Dcfu-rows=N`, `-Dcfu-cols=N`, `-Dcfu-store-depth=D` (must match Verilog + Justfile).
 - **Output:** `zig-out/bin/firmware.bin` (objcopy'd ELF → binary for serial boot).
 
 ## Common Pitfalls
 
-1. **"csr.json not found"** → Run `just hw-build` before `zig build firmware`.
+1. **"csr.json not found"** → Run `just soc` before `zig build firmware`.
 2. **Stale `top.v`** → Always run `just verilog` after RTL changes.
 3. **Parameter mismatch** → If you change `cfu_rows`, update Justfile variables.
-4. **Serial port collision** → Only one process can access `/dev/ttyUSB1`; close `litex_term` before `hw-gemm`.
-5. **E2E test hangs** → Board may be in bad state; run `just hw-reset && just hw-upload-once` to recover.
+4. **Serial port collision** → Only one process can access `/dev/ttyUSB1`; close `litex_term` before `just gemm`.
+5. **E2E test hangs** → Board may be in bad state; run `just up` to recover.
 
 ## Debugging Firmware
 
@@ -233,7 +213,7 @@ Firmware has `link.sendDebug(value: u32)` in `firmware/link.zig` that prints `DE
 - `[3] = instruction index or error context`
 - `[4+] = opcode or additional data`
 
-Parse debug payload in driver output when seeing errors.
+Parse the debug payload in the `ProtocolError` message when seeing errors.
 
 ### Common Firmware Errors
 
@@ -287,15 +267,11 @@ Test parameters:
 
 Use `--no-verify` to just run and check cycles, or `--verify-tolerance 1` for ±1 tolerance.
 
-### Driver Debugging
-
-Driver outputs to stderr. Use `-v` flag for verbose output showing all driver commands.
-
 ## Pre-commit / CI
 
 No pre-commit hooks or CI workflows currently defined. Manual checks:
 - `uv run pytest hardware` must pass (Amaranth simulation).
-- `just hw-all` must complete end-to-end on Tang Nano 20K.
-- `loom-gemm /dev/ttyUSB1 all --verify-tolerance 1` should pass.
-- `just sim-gemm` should pass (GEMM regression on Verilator).
+- `just all` must complete end-to-end on Tang Nano 20K.
+- `just gemm-sweep` should pass on the board.
+- `just gemm sim` should pass (GEMM regression on Verilator).
 - Don't commit `top.v` if it's stale; regenerate before committing.

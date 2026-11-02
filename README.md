@@ -2,7 +2,7 @@
 
 A full-stack int8 inference accelerator targeting the **Sipeed Tang Nano 20K** (Gowin GW2AR-18).
 Implements an output-stationary systolic array as a VexRiscv Custom Function Unit (CFU),
-with a model-binary runtime, bare-metal firmware, host driver, and xDSL compiler pipeline.
+with a model-binary runtime, bare-metal firmware, a Python host transport, and an xDSL compiler pipeline.
 
 ## Stack
 
@@ -29,8 +29,7 @@ GEMM kernels.
 |-------------|-----------------|----------------------------------------------------------|
 | `hardware/` | Python/Amaranth | CFU RTL — systolic array, DMA scratchpads, sequencer, epilogue |
 | `firmware/` | Zig             | Bare-metal RISC-V firmware: UART protocol, `.lmb` executor, KIR interpreter, DMA/CFU drivers |
-| `host/`     | Zig             | Host-side native driver + C API (`libloom.so`)          |
-| `shared/`   | Zig + Python    | Wire protocol, IR definitions (shared across firmware, host, and tools) |
+| `shared/`   | Zig + Python    | Wire protocol + Serial/TCP transports, IR definitions (shared by firmware and Python) |
 | `compiler/` | Python          | xDSL frontend/dialects/rewrites, affine lowering, RV32I + CUSTOM0 backend, model runtime |
 | `models/`   | Python          | Int8 MNIST training + static quantization (ONNX export)  |
 | `tests/`    | Python          | E2E GEMM test harness, Verilator sim tests, model-binary pipeline tests |
@@ -41,7 +40,7 @@ GEMM kernels.
 ## Prerequisites
 
 - [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) (Yosys, nextpnr-gowin, openFPGALoader)
-- [Zig](https://ziglang.org/) (0.13+)
+- [Zig](https://ziglang.org/) (0.17)
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [just](https://github.com/casey/just) (task runner)
 - Sipeed Tang Nano 20K board (for hardware testing; simulation tests need no board)
@@ -49,28 +48,34 @@ GEMM kernels.
 ## Quick Start
 
 ```sh
-# Run RTL simulation tests (no board needed)
-uv run pytest hardware -v
+# Offline tests: RTL simulation, compiler, firmware host tests (no board needed)
+just test
 
-# Full hardware flow: generate Verilog → build SoC → flash → build firmware → upload
-just hw-all
+# Full hardware flow: Verilog → SoC/bitstream → flash → firmware → boot
+just all
 
-# Run end-to-end GEMM test against the board
-just hw-gemm
+# Board already flashed? Just (re)boot the firmware
+just up
+
+# End-to-end GEMM on the board, or on Verilator with `sim`
+just gemm
+just gemm sim
+```
+
+Run/test recipes take `target=hw|sim` (default `hw`). Override the serial port
+and toolchain location with `LOOM_PORT` / `OSS_CAD_BIN` (environment or `.env`).
 ```
 
 ## Build Order
 
 RTL changes and firmware builds have a strict dependency chain:
 
-1. `just verilog` — regenerate `top.v` from Amaranth
-2. `just hw-build` — build LiteX SoC + bitstream (generates `csr.json`)
-3. `just hw-flash` — flash bitstream to board
-4. `just hw-firmware` — build firmware (reads CSR addresses from `csr.json`)
-5. `just hw-upload-once` — serial-boot firmware onto running board
-6. `just hw-gemm` — end-to-end verification
+1. `just soc` — regenerate `top.v`, build LiteX SoC + bitstream (generates `csr.json`)
+2. `just flash` — flash bitstream to board
+3. `just up` — build firmware against `csr.json`, reset, serial-boot, ping
+4. `just gemm` — end-to-end verification
 
-Skipping step 2 before step 4 causes `csr.json not found` errors.
+`just firmware` refuses to run until `just soc` has produced `csr.json`.
 
 ## Showcase Analytics
 
@@ -121,9 +126,9 @@ uv run pytest hardware/memory/ -v      # Scratchpad
 uv run pytest hardware/epilogue/ -v    # Requantization
 uv run pytest hardware/control/ -v     # Sequencer
 
-# E2E on hardware (requires board + firmware)
-just hw-gemm
-just hw-gemm-reset
+# E2E on hardware (requires `just up`)
+just gemm
+just gemm-sweep            # small GEMM + K-tiled GEMM
 ```
 
 ## xDSL Model-Binary Compiler
@@ -162,15 +167,7 @@ uv run loom-run-model build/mnist.lmb build/input_i8.bin --port /dev/ttyUSB1 \
   -o build/output_i8.bin --expect-output build/expected_i8.bin \
   --tolerance 2 --check-prediction
 
-# Run the compiled model binary on Verilator sim and print/check logits
-just sim-mnist
-
-# Run the standalone .lmb artifact path through the loom-run-model CLI on sim
-just sim-mnist-artifact
-
-# Run the model binary on hardware after bitstream + firmware upload
-just hw-mnist
-
-# Run the standalone .lmb artifact path through the loom-run-model CLI on hardware
-just hw-mnist-artifact
+# Compile MNIST to a .lmb and run it through loom-run-model on the board / sim
+just mnist
+just mnist sim
 ```

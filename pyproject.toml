@@ -43,7 +43,6 @@ namespaces = true
 [tool.pytest.ini_options]
 testpaths = ["hardware", "hardware/systolic", "hardware/memory", "hardware/epilogue", "tests"]
 pythonpath = ["."]
-addopts = ["--ignore=hardware/experiments"]
 
 [tool.ty.src]
 root = "hardware"

@@ -112,6 +112,9 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
         return _n_region_keep_act_ops(ctx, region)
     if (ctx.spec.keep_wgt and single_chunk and mr.upper >= 2 * mr.step):
         return _n_region_keep_wgt_prefetch_ops(ctx, region)
+    if (ctx.spec.keep_wgt and single_chunk and mr.upper <= mr.step
+            and region.upper - region.lower > region.step):
+        return _n_region_single_m_prefetch_ops(ctx, region)
     def n_body(n_iv: SSAValue) -> list[Operation]:
         # Epilogue params depend only on the N tile and live in a CFU memory
         # that nothing else writes, so upload them once per N tile rather
@@ -191,6 +194,53 @@ def _n_region_keep_act_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[O
         m0, k0, n_first, *act_ops,
         *_dma_kick_ops(ctx.csr.act_dma, act_addr, nbytes),
         *_for_ops(region.lower, region.upper, region.step, n_body),
+    ]
+
+
+def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
+    """Single M tile, many N tiles: tile n + 1's DMAs overlap tile n.
+
+    Per N tile: upload params, start compute (swaps both banks), kick the
+    activation and weight DMAs for n + 1 into the free banks, wait, store,
+    wait for the DMAs. The last N tile prefetches one weight tile past this
+    layer's weights (harmless); it is drained before returning. (Gated on
+    keep_wgt only as the marker of a bitstream with this DMA ordering
+    tested; no keep flags are used.)
+    """
+    mr = region.m_region
+    kr = mr.k_regions[0]
+    nbytes = kr.k_count * ctx.spec.tile
+    act, wgt = ctx.csr.act_dma, ctx.csr.wgt_dma
+
+    def kick(n_reg: SSAValue) -> list[Operation]:
+        m0 = rv32.LiOp(0)
+        k0 = rv32.LiOp(kr.lower)
+        act_ops, act_addr = _activation_dma_addr(ctx.spec, m0.rd, k0.rd, n_reg)
+        wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_reg, k0.rd)
+        return [m0, k0, *act_ops, *wgt_ops,
+                *_dma_kick_ops(act, act_addr, nbytes), *_dma_kick_ops(wgt, wgt_addr, nbytes)]
+
+    def n_body(n_iv: SSAValue) -> list[Operation]:
+        k0 = rv32.LiOp(kr.lower)
+        flags_ops, flags = _compute_flags(ctx.spec, kr, k0.rd)
+        k_count = rv32.LiOp(kr.k_count)
+        n_next = riscv.AddiOp(n_iv, region.step)
+        m0 = rv32.LiOp(0)
+        return [
+            *_epilogue_ops(ctx, region.n_count, n_iv),
+            k0, *flags_ops, k_count,
+            loom_riscv.ComputeStartOp(flags, k_count.rd),
+            n_next, *kick(n_next.rd),
+            loom_riscv.ComputeWaitOp(),
+            m0, *_store_result_ops(ctx, region.n_count, m0.rd, n_iv),
+            *_dma_complete_ops(ctx.csr, [act, wgt]),
+        ]
+
+    n0 = rv32.LiOp(region.lower)
+    return [
+        n0, *kick(n0.rd), *_dma_complete_ops(ctx.csr, [act, wgt]),
+        *_for_ops(region.lower, region.upper, region.step, n_body),
+        *_dma_stop_ops(act), *_dma_stop_ops(wgt),
     ]
 
 

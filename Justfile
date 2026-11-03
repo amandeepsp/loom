@@ -37,8 +37,13 @@ verilog:
     uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }}
 
 # CFU features the current RTL implements (see compiler/backend/target.py).
-cfu_features := "packed_read,keep_wgt,keep_act"
+# Verified on hardware: packed_read. keep_wgt/keep_act are implemented in RTL
+# but their codegen hangs the firmware (under investigation), so not listed.
+cfu_features := "packed_read"
 soc_baud := "1000000"
+# 48 MHz builds are marginal on paths nextpnr's Gowin timing model does not
+# flag (placement-dependent wrong outputs); 40.5 MHz (27 MHz x 1.5) is exact.
+sys_clk := "40.5e6"
 
 # Build the LiteX SoC + bitstream for the Tang Nano 20K (slow, ~30-40 min).
 # Gowin placement is seed-sensitive: try `just soc seed=11` if it fails, and
@@ -47,7 +52,8 @@ soc seed="2": verilog
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
         --build --toolchain apicula --pnr-seed {{ seed }} \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \
-        {{ _cfu_args }} --with-cfu-led-debug --uart-baudrate {{ soc_baud }}
+        {{ _cfu_args }} --with-cfu-led-debug --uart-baudrate {{ soc_baud }} \
+        --sys-clk-freq {{ sys_clk }}
     echo "{{ cfu_features }}" > {{ hw_dir }}/loom_cfu_features
 
 # Generate the simulation SoC (csr.json, BIOS) without compiling gateware.

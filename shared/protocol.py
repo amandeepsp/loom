@@ -97,7 +97,7 @@ class FramingProtocol:
 READ_CHUNK_MAX = 8192
 
 # Must match the SoC build (`--uart-baudrate`); override with LOOM_BAUD.
-DEFAULT_BAUD = int(os.environ.get("LOOM_BAUD", "115200"))
+DEFAULT_BAUD = int(os.environ.get("LOOM_BAUD", "1000000"))
 
 
 class BaseTransport:

@@ -144,6 +144,8 @@ def main() -> int:
     # Steady state = last image (one-time work like constant loading is
     # paid by the first); first-image cycles are logged alongside.
     mean_cycles = int(cycles[-1])
+    clock_hz = int(json.loads(Path(args.csr_json).read_text())["constants"].get(
+        "config_clock_frequency", 48_000_000))
 
     previous = []
     if LOG.exists():
@@ -161,7 +163,8 @@ def main() -> int:
         "model": args.model,
         "images": args.images,
         "cycles": mean_cycles,
-        "ms": round(mean_cycles / 48e3, 2),
+        "ms": round(mean_cycles / (clock_hz / 1e3), 2),
+        "clock_hz": clock_hz,
         "first_cycles": int(cycles[0]),
         "passed": passed,
         "reject_reasons": reasons,

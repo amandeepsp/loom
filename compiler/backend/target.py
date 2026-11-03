@@ -81,6 +81,7 @@ class GemmTargetSpec:
     # Optional CFU features (Batch A bitstreams only; see cfu_features()).
     packed_read: bool = False
     keep_wgt: bool = False
+    keep_act: bool = False
     # Fused store: write results straight into the next layer's packed tile
     # layout ([m/tile][n][tile]) through a 384-byte rebased requant LUT,
     # replacing the next layer's separate pack step.
@@ -103,7 +104,7 @@ def cfu_features() -> frozenset[str]:
     """CFU features the target bitstream supports, from $LOOM_CFU_FEATURES.
 
     Comma-separated: `packed_read` (READ_RESULT funct7=1), `keep_wgt`
-    (compute flag bit 2). Off by default: on older bitstreams these
+    (compute flag bit 2), `keep_act` (compute flag bit 3). Off by default: on older bitstreams these
     instructions/flags are ignored and would silently corrupt results.
     """
     import os

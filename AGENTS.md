@@ -188,6 +188,23 @@ uv run litex_term /dev/ttyUSB1  # not litex_term directly
 3. **Parameter mismatch** → If you change `cfu_rows`, update Justfile variables.
 4. **Serial port collision** → Only one process can access `/dev/ttyUSB1`; close `litex_term` before `just gemm`.
 5. **E2E test hangs** → Board may be in bad state; run `just up` to recover.
+6. **CFU features** → Optional CFU features are advertised by a
+   `loom_cfu_features` file next to `csr.json` (`just soc` writes it from the
+   Justfile's `cfu_features`), or `$LOOM_CFU_FEATURES`. The compiler only uses
+   what the marker lists, so a marker must match the flashed bitstream.
+7. **Placement fails** ("unable to find legal placement") → seed-sensitive and
+   the design is near the limit; try several `just soc seed=N` (build in
+   parallel into separate `--output-dir`s). The `soc` default is the last seed
+   that placed.
+8. **litex-boards** → The board target needs local edits (drained CSR,
+   `--l2-size` honored, result write-back hook):
+   `soc/patches/litex-boards-sipeed_tang_nano_20k.patch`.
+9. **Sim vs board firmware** → `just firmware sim` and `just up` both write
+   `zig-out/bin/firmware.bin`; a sim run after `just up` (or vice versa)
+   needs a rebuild, or the sim never prints `[link] ready`.
+10. **Before an hour-long bitstream build** → run the Verilator model check:
+    `LOOM_SIM_L2=0 uv run pytest tests/test_sim.py -k mobilenet --run-sim`
+    (every layer bit-exact on the current RTL).
 
 ## Debugging Firmware
 
@@ -239,6 +256,14 @@ Test parameters:
 - Supports software M and N tiling for matrices larger than 8x8
 
 Use `--no-verify` to just run and check cycles, or `--verify-tolerance 1` for ±1 tolerance.
+
+## Performance gate
+
+`python -m tools.perf_loop --label "..."` runs MobileNet on the board, checks
+every pack and GEMM bit-exact against a host model plus ONNX agreement and
+dense GEMM shapes, prints cycles and the top steps, and appends to
+`analytics/perf_log.jsonl`. Every performance change was gated with it; see
+`docs/architecture-improvements.md` for the history and current state.
 
 ## Pre-commit / CI
 

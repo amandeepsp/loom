@@ -34,7 +34,7 @@ default:
 
 # Generate the CFU Verilog (top.v) from Amaranth.
 verilog:
-    uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }}
+    uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }} --gowin-dsp
 
 # CFU features the current RTL implements (see compiler/backend/target.py).
 cfu_features := "packed_read,keep_wgt,keep_act"

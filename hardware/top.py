@@ -36,6 +36,7 @@ class TopConfig:
     store_depth: int = 512
     in_width: int = 8
     acc_width: int = 32
+    gowin_dsp: bool = False  # PE products in MULT9X9 output registers (FPGA build)
 
     @property
     def act_line_width(self) -> int:
@@ -114,7 +115,7 @@ class Top(Cfu):
         m.submodules.wgt_scratch = wgt_sp
 
         self.array = array = OutputStationaryPEArray(
-            rows, cols, self.config.in_width, self.config.acc_width
+            rows, cols, self.config.in_width, self.config.acc_width, self.config.gowin_dsp
         )
         self.seq = seq = OSSequencer(
             rows=rows,
@@ -297,6 +298,7 @@ def build_config_from_args(args: argparse.Namespace) -> TopConfig:
         store_depth=args.cfu_store_depth,
         in_width=args.cfu_in_width,
         acc_width=args.cfu_acc_width,
+        gowin_dsp=args.gowin_dsp,
     )
 
 
@@ -317,6 +319,8 @@ def main() -> None:
     parser.add_argument("--cfu-in-width", default=8, type=int, help="CFU activation and weight element width in bits.")
     parser.add_argument("--cfu-acc-width", default=32, type=int, help="CFU accumulator width in bits.")
     parser.add_argument("--output", default="top.v", help="Output Verilog path.")
+    parser.add_argument("--gowin-dsp", action="store_true",
+                        help="Instantiate Gowin MULT9X9 (OUT_REG) for PE multiplies.")
     args = parser.parse_args()
 
     write_verilog(build_config_from_args(args), args.output)

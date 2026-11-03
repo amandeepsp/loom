@@ -109,6 +109,8 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
                 k0,
                 *wgt_ops,
                 *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, kr.k_count * ctx.spec.tile),
+                # Wait for it once; it stays enabled (and done) for the M loop.
+                *_dma_complete_ops(ctx.csr, [ctx.csr.wgt_dma]),
                 *_for_ops(
                     0,
                     mr.upper,
@@ -231,9 +233,12 @@ def _k_body(
     return [
         *dma_ops,
         loom_riscv.WaitPreviousComputeOp(k_iv),
-        *_dma_complete_ops(ctx.csr),
+        # With keep_wgt only the activation DMA belongs to this tile; the
+        # weight DMA was issued (and waited for) before the M loop and must
+        # stay enabled: disabling resets the reader, so `done` would drop.
+        *_dma_complete_ops(ctx.csr, [ctx.csr.act_dma] if keep_wgt else None),
         *_dma_stop_ops(ctx.csr.act_dma),
-        *_dma_stop_ops(ctx.csr.wgt_dma),
+        *([] if keep_wgt else _dma_stop_ops(ctx.csr.wgt_dma)),
         *flags_ops,
         k_count,
         loom_riscv.ComputeStartOp(flags, k_count.rd),
@@ -644,9 +649,9 @@ def _dma_wait_loop(done_addr: int) -> Operation:
     return riscv_scf.WhileOp((), (), Region(before), Region(after))
 
 
-def _dma_complete_ops(csr, *, act_only: bool = False) -> list[Operation]:
-    """Wait until the issued DMA transfers have fully landed in the scratchpads."""
-    regs = [csr.act_dma] if act_only else [csr.act_dma, csr.wgt_dma]
+def _dma_complete_ops(csr, regs=None) -> list[Operation]:
+    """Wait until the given DMA transfers (default: both) have fully landed."""
+    regs = regs if regs is not None else [csr.act_dma, csr.wgt_dma]
     if all(r.drained is not None for r in regs):
         # Hardware reports delivery directly; no delay fence required.
         return [_dma_wait_loop(r.drained) for r in regs]

@@ -340,6 +340,7 @@ def layer_errors(artifact, onnx_path: Path, transport, debug: dict | None = None
                 "lanes": np.nonzero(bad.any(axis=(0, 1)))[0].tolist(),
                 "got_t0": got[0, :8].tolist(),
                 "want_t0": want3[0, :8].tolist(),
+                "got": got, "want": want3,
             }
         prev_out = actual.reshape(-1)
     return errors

@@ -15,6 +15,7 @@ from amaranth.back.verilog import convert
 from amaranth.lib import wiring
 
 from hardware.cfu import Cfu
+from hardware.memory.linegen import LineGen
 from hardware.memory.scratchpad import DmaWriteSignature, DoubleScratchpad
 from hardware.systolic.os_pe_array import OutputStationaryPEArray
 from hardware.control.os_sequencer import OSSequencer
@@ -27,6 +28,7 @@ from hardware.decoder.instructions import (
     ReadResultInstruction,
     PerfCounterInstruction,
     WriteActInstruction,
+    LineGenInstruction,
 )
 
 
@@ -37,6 +39,9 @@ class TopConfig:
     store_depth: int = 512
     in_width: int = 8
     acc_width: int = 32
+    # Hardware depthwise im2col (LineGen) with a plane buffer of this many
+    # 64-bit words (0 disables it).
+    linegen_words: int = 1024
 
     @property
     def act_line_width(self) -> int:
@@ -60,7 +65,9 @@ class Top(Cfu):
         # DMA write ports — exposed on Verilog boundary for SoC adapter
         self.rows = self.config.rows
         self.cols = self.config.cols
-        sig_act = DmaWriteSignature(addr_width=addr_bits, data_width=self.config.act_line_width)
+        # The activation DMA also fills LineGen's (larger) plane buffer.
+        act_addr_bits = max(addr_bits, (self.config.linegen_words - 1).bit_length())
+        sig_act = DmaWriteSignature(addr_width=act_addr_bits, data_width=self.config.act_line_width)
         sig_wgt = DmaWriteSignature(addr_width=addr_bits, data_width=self.config.wgt_line_width)
         self.dma_act = sig_act.create(path=("dma_act",))
         self.dma_wgt = sig_wgt.create(path=("dma_wgt",))
@@ -90,6 +97,7 @@ class Top(Cfu):
         m.submodules.i_read_result = self.i_read_result = ReadResultInstruction()
         m.submodules.i_perf_counter = self.i_perf_counter = PerfCounterInstruction()
         m.submodules.i_write_act = self.i_write_act = WriteActInstruction()
+        m.submodules.i_linegen = self.i_linegen = LineGenInstruction()
         return {
             0: self.i_compute_start,
             1: self.i_compute_wait,
@@ -98,6 +106,7 @@ class Top(Cfu):
             4: self.i_read_result,
             5: self.i_perf_counter,
             6: self.i_write_act,
+            7: self.i_linegen,
         }
 
     def elaborate(self, platform):
@@ -151,9 +160,32 @@ class Top(Cfu):
 
         # === DMA → Scratchpad fill bank ===================================
 
-        # Activation fill bank: DMA, or CPU lines via WRITE_ACT (funct3=6).
+        # Activation fill bank: LineGen lines, CPU lines via WRITE_ACT
+        # (funct3=6), or the DMA. In plane-buffer mode the DMA fills LineGen.
         i_wa = self.i_write_act
-        with m.If(i_wa.wr_en):
+        i_lg = self.i_linegen
+        lg = None
+        if self.config.linegen_words:
+            m.submodules.linegen = lg = self.linegen = LineGen(
+                words=self.config.linegen_words,
+                lines_addr_width=len(act_sp.wr.addr))
+            m.d.comb += [
+                lg.dma_addr.eq(self.dma_act.addr),
+                lg.dma_data.eq(self.dma_act.data),
+                lg.dma_en.eq(self.dma_act.en & i_lg.planebuf_mode),
+                lg.iw.eq(i_lg.iw), lg.ih.eq(i_lg.ih), lg.plane.eq(i_lg.plane),
+                lg.stride2.eq(i_lg.stride2), lg.zp.eq(i_lg.zp),
+                lg.start.eq(i_lg.gen_start), lg.iy0.eq(i_lg.iy0),
+                lg.row0.eq(i_lg.row0), lg.ix0.eq(i_lg.ix0),
+                i_lg.gen_busy.eq(lg.busy),
+            ]
+        with m.If(lg.wr_en if lg is not None else 0):
+            m.d.comb += [
+                act_sp.wr.addr.eq(lg.wr_addr),
+                act_sp.wr.data.eq(lg.wr_data),
+                act_sp.wr.en.eq(1),
+            ]
+        with m.Elif(i_wa.wr_en):
             m.d.comb += [
                 act_sp.wr.addr.eq(i_wa.wr_addr),
                 act_sp.wr.data.eq(i_wa.wr_data),
@@ -163,7 +195,7 @@ class Top(Cfu):
             m.d.comb += [
                 act_sp.wr.addr.eq(self.dma_act.addr),
                 act_sp.wr.data.eq(self.dma_act.data),
-                act_sp.wr.en.eq(self.dma_act.en),
+                act_sp.wr.en.eq(self.dma_act.en & ~i_lg.planebuf_mode),
             ]
         wiring.connect(m, wiring.flipped(self.dma_wgt), wgt_sp.wr)
 

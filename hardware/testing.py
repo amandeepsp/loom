@@ -33,7 +33,17 @@ async def cfu_op(ctx, dut, funct3, funct7, in0, in1, *, max_cycles=5000):
     ctx.set(dut.cmd_in0, in0)
     ctx.set(dut.cmd_in1, in1)
     ctx.set(dut.rsp_ready, 1)
+    single_cycle = ctx.get(dut.rsp_valid)  # responded in the handshake cycle
     await ctx.tick()
+    if not single_cycle:
+        # Like the CPU: the command was accepted (cmd_ready in WAIT_CMD), so
+        # the payload is no longer valid while a multi-cycle op runs.
+        # Scramble it so instructions that re-read funct7 / inputs after the
+        # start cycle fail here instead of only on the SoC.
+        ctx.set(dut.cmd_valid, 0)
+        ctx.set(dut.cmd_function_id, {"funct3": funct3, "funct7": 0x55})
+        ctx.set(dut.cmd_in0, 0xA5A5A5A5)
+        ctx.set(dut.cmd_in1, 0x5A5A5A5A)
 
     for _ in range(max_cycles):
         if ctx.get(dut.rsp_valid):

@@ -419,6 +419,14 @@ def dwpack_defines(layer, tile: int = 8, *, dense_nchw: bool = False) -> dict[st
             "PLANE": ih * iw, "K": layer.k, "CHANNEL_MAJOR": int(not dense_nchw)}
 
 
+def linegen_ok(layer, tile: int = 8) -> bool:
+    """Depthwise 3x3 the CFU LineGen can im2col: 8-pixel tiles on one output
+    row (OW % 8 == 0), stride 1/2, and a group's 8 planes in its 8 KiB buffer."""
+    d = dwpack_defines(layer, tile)
+    return (d is not None and d["STRIDE"] in (1, 2) and d["OW"] % 8 == 0
+            and 8 * d["IH"] * d["IW"] <= 8192)
+
+
 def _f1_fusable(layer, nxt) -> bool:
     """F1: `layer` can store straight into `nxt`'s packed (pointwise) input."""
     return (nxt is not None and nxt.packing is None and nxt.kind == "conv2d"
@@ -656,6 +664,7 @@ def _compile_quantized_mobilenet(
     mapped_inputs: dict[int, Buffer] = {}  # layer index -> LUT-mapped input its producer fills
     chw_strides: dict[int, int] = {}  # layer index -> channel stride of its CHW input
     gather_inputs: set[int] = set()  # layers whose CHW input needs dwgemm gather mode
+    linegen_inputs: set[int] = set()  # layers whose im2col runs in the CFU LineGen
     for index, layer in enumerate(plan.layers):
         transform_addr = 0
         if layer.input_transform is not None:
@@ -706,6 +715,8 @@ def _compile_quantized_mobilenet(
                 dw_defines = dwgather_defines(layer, tile)
             if dw_defines is not None and index in chw_strides:
                 dw_defines["PLANE"] = chw_strides[index]
+            if dw_defines is not None and index in linegen_inputs:
+                dw_defines["LINEGEN"] = 1
             if dw_defines is None and not transform_addr:
                 dw_defines = dwpack_defines(layer, tile, dense_nchw=True)
             if premapped is not None:
@@ -747,8 +758,8 @@ def _compile_quantized_mobilenet(
                 tile=tile,
                 nchw=packing.nchw,
             )
-            if dw_defines is not None and dw_defines.get("GATHER"):
-                pack_code = b""  # runs fused (dwgemm.c gather mode); no pack step
+            if dw_defines is not None and (dw_defines.get("GATHER") or dw_defines.get("LINEGEN")):
+                pack_code = b""  # runs fused (dwgemm.c gather / LineGen mode); no pack step
             elif dw_defines is not None:
                 # ... and stored it channel-major: word-wise depthwise im2col.
                 pack_code = compile_c_kernel(pack_name, "dwpack.c", {
@@ -887,7 +898,15 @@ def _compile_quantized_mobilenet(
             # pack source, replacing its separate lut_map pass.
             nnxt = plan.layers[index + 2] if index + 2 < len(plan.layers) else None
             features = cfu_features(csr_json)
-            if dwpack_defines(nxt, tile) is not None and padded_m == layer.m:
+            if ("linegen" in features and "act_write" in features and result_lut
+                    and linegen_ok(nxt, tile) and padded_m == layer.m
+                    and _f1_fusable(nxt, nnxt)):
+                # Consumer im2col runs in the CFU from a DMA'd copy of the
+                # planes: unpadded CHW (one contiguous transfer per group).
+                chw_stride = padded_m
+                chw_strides[index + 1] = chw_stride
+                linegen_inputs.add(index + 1)
+            elif dwpack_defines(nxt, tile) is not None and padded_m == layer.m:
                 chw_stride = chw_plane_stride(padded_m)  # consumer's dwpack reads CHW
                 chw_strides[index + 1] = chw_stride
             elif ("act_write" in features and result_lut and nxt.n % tile == 0
@@ -942,8 +961,9 @@ def _compile_quantized_mobilenet(
             and (padded_m == layer.m or dw_defines.get("GATHER"))
             and csr_map.wgt_dma.drained is not None
         )
-        if dw_defines is not None and dw_defines.get("GATHER") and not fused_kernel:
-            raise AssertionError(f"{layer.name}: gather-mode CHW input but layer not fused")
+        if dw_defines is not None and (dw_defines.get("GATHER") or dw_defines.get("LINEGEN")) \
+                and not fused_kernel:
+            raise AssertionError(f"{layer.name}: CHW input for a fused-only mode but layer not fused")
         kind = layer.kind
         if fused_kernel:
             # 3x3 conv whose im2col lines the CPU streams straight into the CFU.
@@ -960,6 +980,9 @@ def _compile_quantized_mobilenet(
                 "WGT_CSR_BASE": wgt.base, "WGT_CSR_LENGTH": wgt.length,
                 "WGT_CSR_ENABLE": wgt.enable, "WGT_CSR_LOOP": wgt.loop,
                 "WGT_CSR_DRAINED": wgt.drained,
+                "ACT_CSR_BASE": csr_map.act_dma.base, "ACT_CSR_LENGTH": csr_map.act_dma.length,
+                "ACT_CSR_ENABLE": csr_map.act_dma.enable, "ACT_CSR_LOOP": csr_map.act_dma.loop,
+                "ACT_CSR_DRAINED": csr_map.act_dma.drained,
                 "PARAM_ROWS": 1 if "col_params" in features else tile,
             })
             asm = ""

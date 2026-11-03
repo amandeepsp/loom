@@ -52,7 +52,7 @@ sys_clk := "40.5e6"
 # dcache refill cost (needs the local litex-boards target honoring --l2-size).
 soc seed="5": verilog
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
-        --build --toolchain apicula --pnr-seed {{ seed }} --l2-size 0 \
+        --build --toolchain apicula --pnr-seed {{ seed }} --l2-size 0 --cfu-act-addr-width 10 \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \
         {{ _cfu_args }} --with-cfu-led-debug --uart-baudrate {{ soc_baud }} \
         --sys-clk-freq {{ sys_clk }}

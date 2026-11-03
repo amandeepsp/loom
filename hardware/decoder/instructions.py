@@ -1,4 +1,4 @@
-from amaranth import Cat, Signal, signed
+from amaranth import Cat, Mux, Signal, signed
 from amaranth.lib.wiring import In, Out
 from hardware.cfu import Instruction
 
@@ -170,6 +170,77 @@ class WriteActInstruction(Instruction):
                 m.d.sync += ptr.eq(ptr + 1)
 
         self.signal_done(m)
+        return m
+
+
+class LineGenInstruction(Instruction):
+    """funct3=7: hardware depthwise im2col (LineGen) control.
+
+    funct7=0: geometry: in0 = iw[0:10] | ih[10:20] | stride2[20];
+              in1 = plane bytes [0:14].
+    funct7=1: in0[0] = plane-buffer mode (activation DMA fills LineGen's
+              plane buffer instead of the activation scratchpad);
+              in1[0:8] = input zero point.
+    funct7=2: GEN one tile: in0 = row0[0:16] (byte offset of row iy0 within a
+              plane) | iy0[16:27]; in1 = ix0[0:12]. Non-blocking; the 72
+              lines land in the activation fill bank.
+    funct7=3: wait until GEN is done (blocking).
+    """
+
+    iw: Out(10)
+    ih: Out(10)
+    plane: Out(14)
+    stride2: Out(1)
+    zp: Out(8)
+    planebuf_mode: Out(1)
+    gen_start: Out(1)
+    iy0: Out(signed(11))
+    row0: Out(signed(16))
+    ix0: Out(signed(12))
+    gen_busy: In(1)
+
+    def elaborate(self, platform):
+        m = super().elaborate(platform)
+
+        # GEN operands are latched and the start pulse issued a cycle later,
+        # so LineGen never sees them change mid-tile.
+        m.d.sync += self.gen_start.eq(self.start & (self.funct7 == 2))
+        with m.If(self.start):
+            with m.Switch(self.funct7):
+                with m.Case(0):
+                    m.d.sync += [
+                        self.iw.eq(self.in0[0:10]),
+                        self.ih.eq(self.in0[10:20]),
+                        self.stride2.eq(self.in0[20]),
+                        self.plane.eq(self.in1[0:14]),
+                    ]
+                with m.Case(1):
+                    m.d.sync += [
+                        self.planebuf_mode.eq(self.in0[0]),
+                        self.zp.eq(self.in1[0:8]),
+                    ]
+                with m.Case(2):
+                    m.d.sync += [
+                        self.row0.eq(self.in0[0:16]),
+                        self.iy0.eq(self.in0[16:27]),
+                        self.ix0.eq(self.in1[0:12]),
+                    ]
+
+        m.d.comb += self.output.eq(0)
+        # The command payload (funct7) is only valid in the start cycle: the
+        # CPU may change it while a multi-cycle op waits, so remember that
+        # this op is a WAIT instead of re-reading funct7.
+        waiting = Signal()
+        with m.If(self.start):
+            m.d.sync += waiting.eq(self.funct7 == 3)
+        is_wait = Signal()
+        m.d.comb += is_wait.eq(Mux(self.start, self.funct7 == 3, waiting))
+        with m.If(is_wait):
+            # Busy covers the registered start pulse too (gen_start feeds
+            # LineGen.busy), so a WAIT right after GEN still blocks.
+            m.d.comb += self.done.eq(~self.gen_busy & ~self.gen_start)
+        with m.Else():
+            self.signal_done(m)
         return m
 
 

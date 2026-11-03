@@ -28,20 +28,6 @@ async def write_per_channel_params(ctx, dut, biases, mults, shifts):
 
 
 class TestCfuTop:
-    def test_fallback_instruction(self):
-        """Unused funct3 slots return in0 (fallback behavior)."""
-
-        async def testbench(ctx):
-            result = await cfu_op(ctx, dut, funct3=7, funct7=0, in0=0xDEADBEEF, in1=0)
-            assert result == 0xDEADBEEF
-
-        dut = Top(TopConfig(rows=4, cols=4))
-        sim = Simulator(dut)
-        sim.add_clock(1e-6)
-        sim.add_testbench(testbench)
-        with sim.write_vcd("waves/test_cfu_fallback.vcd"):
-            sim.run()
-
     def test_submodules_exist(self):
         """All datapath submodules are instantiated."""
         dut = Top(TopConfig(rows=4, cols=4))
@@ -589,6 +575,140 @@ class TestColumnParams:
             await run_tile(ctx, dut, k=K, first=True, last=True)
             for i, e in enumerate(expected):
                 assert to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0)) == e, i
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()
+
+
+class TestLineGenTop:
+    def test_hardware_im2col_depthwise_tile(self):
+        """Plane-buffer DMA + GEN + compute = depthwise 3x3 on 8 channels."""
+        from hardware.memory.test_linegen import reference_lines
+        IH = IW = 8
+        rng = np.random.default_rng(21)
+        planes = rng.integers(-20, 20, size=(8, IH, IW), dtype=np.int8)
+        w = rng.integers(-20, 20, size=(8, 9), dtype=np.int8)
+        zp = -3
+        buf = planes.reshape(-1).view(np.uint8)
+        words = [int.from_bytes(buf[i:i + 8].tobytes(), "little") for i in range(0, len(buf), 8)]
+        # Block-diagonal weights: line c*9 + tap carries w[c, tap] in column c.
+        wgt = [pack_int8([int(w[c, line % 9]) if c == line // 9 else 0 for c in range(8)])
+               for line in range(72)]
+        dut = Top(TopConfig(rows=8, cols=8))
+
+        async def testbench(ctx):
+            n = 64
+            await write_per_channel_params(ctx, dut, [0] * n, [0x7FFFFFFF] * n, [0] * n)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await cfu_op(ctx, dut, funct3=7, funct7=0, in0=IW | (IH << 10), in1=IH * IW)
+            await cfu_op(ctx, dut, funct3=7, funct7=1, in0=1, in1=zp & 0xFF)
+            await dma_fill(ctx, dut.dma_act, words)  # -> plane buffer
+            await cfu_op(ctx, dut, funct3=7, funct7=1, in0=0, in1=zp & 0xFF)
+            await dma_fill(ctx, dut.dma_wgt, wgt)
+            for oy in (0, 4, 7):
+                iy0 = oy - 1
+                await cfu_op(ctx, dut, funct3=7, funct7=2,
+                             in0=((iy0 * IW) & 0xFFFF) | ((iy0 & 0x7FF) << 16), in1=(-1) & 0xFFF)
+                await cfu_op(ctx, dut, funct3=7, funct7=3, in0=0, in1=0)
+                # Keep the weight bank after the first tile (flag bit 2).
+                await cfu_op(ctx, dut, funct3=0, funct7=0, in0=3 | (4 if oy else 0), in1=72)
+                await cfu_op(ctx, dut, funct3=1, funct7=0, in0=0, in1=0)
+                lines = reference_lines(planes, oy, 0, 1, 1, 1, zp)
+                act = np.array([[to_signed8((lines[l] >> (8 * r)) & 0xFF) for l in range(72)]
+                                for r in range(8)], dtype=np.int32)
+                C = act @ np.array([[int(w[c, l % 9]) if c == l // 9 else 0 for c in range(8)]
+                                    for l in range(72)], dtype=np.int32)
+                for r in range(8):
+                    for c in range(8):
+                        e = ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127)
+                        got = to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=r * 8 + c, in1=0))
+                        assert got == e, (oy, r, c)
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()
+
+
+class TestLineGenGroups:
+    def test_two_groups_pipelined_like_dwgemm(self):
+        """dwgemm's order: per group plane DMA; GEN(t+1) during compute(t);
+        next group's weights prefetched into the fill bank after the first
+        compute of a group."""
+        from hardware.memory.test_linegen import reference_lines
+        IH = IW = 8
+        G, T = 3, 8
+        rng = np.random.default_rng(23)
+        planes = rng.integers(-20, 20, size=(8 * G, IH, IW), dtype=np.int8)
+        w = rng.integers(-20, 20, size=(8 * G, 9), dtype=np.int8)
+        zp = -3
+
+        def plane_words(g):
+            buf = planes[8 * g:8 * g + 8].reshape(-1).view(np.uint8)
+            return [int.from_bytes(buf[i:i + 8].tobytes(), "little") for i in range(0, len(buf), 8)]
+
+        def wgt_words(g):
+            return [pack_int8([int(w[8 * g + c, line % 9]) if c == line // 9 else 0 for c in range(8)])
+                    for line in range(72)]
+
+        def expected(g, oy):
+            lines = reference_lines(planes[8 * g:8 * g + 8], oy, 0, 1, 1, 1, zp)
+            act = np.array([[to_signed8((lines[l] >> (8 * r)) & 0xFF) for l in range(72)]
+                            for r in range(8)], dtype=np.int32)
+            W = np.array([[int(w[8 * g + c, l % 9]) if c == l // 9 else 0 for c in range(8)]
+                          for l in range(72)], dtype=np.int32)
+            C = act @ W
+            return [[ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127) for c in range(8)]
+                    for r in range(8)]
+
+        dut = Top(TopConfig(rows=8, cols=8))
+
+        async def gen(ctx, oy):
+            iy0 = oy - 1
+            await cfu_op(ctx, dut, funct3=7, funct7=2,
+                         in0=((iy0 * IW) & 0xFFFF) | ((iy0 & 0x7FF) << 16), in1=(-1) & 0xFFF)
+
+        async def testbench(ctx):
+            await write_per_channel_params(ctx, dut, [0] * 64, [0x7FFFFFFF] * 64, [0] * 64)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await cfu_op(ctx, dut, funct3=7, funct7=0, in0=IW | (IH << 10), in1=IH * IW)
+            await cfu_op(ctx, dut, funct3=7, funct7=1, in0=1, in1=zp & 0xFF)
+            await dma_fill(ctx, dut.dma_wgt, wgt_words(0))
+            for g in range(G):
+                # Per-group param upload (row-0 slots), as dwgemm does.
+                for col in range(8):
+                    for field, val in ((0, 0), (1, 0x7FFFFFFF), (2, 0)):
+                        await cfu_op(ctx, dut, funct3=2, funct7=field, in0=col, in1=val)
+                # Plane buffer, bursty like the LiteDRAM reader stream.
+                for i, word in enumerate(plane_words(g)):
+                    ctx.set(dut.dma_act.addr, i)
+                    ctx.set(dut.dma_act.data, word)
+                    ctx.set(dut.dma_act.en, 1)
+                    await ctx.tick()
+                    ctx.set(dut.dma_act.en, 0)
+                    for _ in range(int(rng.integers(0, 3))):
+                        await ctx.tick()
+                await gen(ctx, 0)
+                for t in range(1, T + 1):
+                    await cfu_op(ctx, dut, funct3=7, funct7=3, in0=0, in1=0)  # wait GEN(t-1)
+                    await cfu_op(ctx, dut, funct3=0, funct7=0, in0=3 | (4 if t > 1 else 0), in1=72)
+                    if t == 1 and g + 1 < G:
+                        for _ in range(20):  # a real DMA lands well after PRIME
+                            await ctx.tick()
+                        await dma_fill(ctx, dut.dma_wgt, wgt_words(g + 1))  # prefetch
+                    if t < T:
+                        await gen(ctx, t)
+                    await cfu_op(ctx, dut, funct3=1, funct7=0, in0=0, in1=0)
+                    exp = expected(g, t - 1)
+                    for r in range(8):
+                        for c in range(8):
+                            got = to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0,
+                                                          in0=r * 8 + c, in1=0))
+                            assert got == exp[r][c], (g, t - 1, r, c, got, exp[r][c])
 
         sim = Simulator(dut)
         sim.add_clock(1e-6)

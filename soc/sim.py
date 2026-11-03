@@ -170,7 +170,9 @@ class LoomSimSoC(SoCCore):
 
             act_port = self.sdram.crossbar.get_port(mode="read", data_width=line_width)
             act_dma = LiteDRAMDMAReader(act_port, fifo_depth=16, with_csr=True)
-            act_adapter = CfuDmaAdapter(act_dma, cfu_store_depth)
+            # 10-bit address: the activation DMA also fills LineGen's 1024-word
+            # plane buffer (top.py linegen_words).
+            act_adapter = CfuDmaAdapter(act_dma, max(cfu_store_depth, 1024))
             # Use flat names so CSRs become act_dma_{base,length,...}
             self.submodules.act_dma = act_dma
             self.submodules += act_adapter

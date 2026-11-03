@@ -87,6 +87,12 @@ void loom_dwgemm(void) {
     CFU_W(3, 0, 0, OUT_ZP);
     CFU_W(3, 1, 0, ACT_MIN);
     CFU_W(3, 2, 0, ACT_MAX);
+#if LINEGEN
+    /* CFU LineGen geometry; plane-buffer mode routes the activation DMA into
+     * its plane buffer for the whole kernel (cleared before returning). */
+    CFU_W(7, 0, IW | (IH << 10) | ((STRIDE == 2) << 20), PLANE);
+    CFU_W(7, 1, 1, (u8)(ZP));
+#endif
 #if CFU_LUT_ADDR
     for (int i = 0; i < 64; ++i) CFU_W(3, 3, i, ((const u32a *)CFU_LUT_ADDR)[i]);
     CFU_W(3, 4, 0, 1);
@@ -94,6 +100,9 @@ void loom_dwgemm(void) {
     CFU_W(3, 4, 0, 0);
 #endif
 
+#ifndef LINEGEN
+#define LINEGEN 0
+#endif
     for (int g = 0; g < N / 8; ++g) {
         /* Epilogue params: one entry per (row, col) result slot. */
         for (int col = 0; col < 8; ++col) {
@@ -109,6 +118,19 @@ void loom_dwgemm(void) {
          * prefetched during group g - 1); they stay in the bank for every
          * tile of the group. */
         if (g == 0) kick_weights(0);
+#if LINEGEN
+        /* This group's 8 planes (contiguous, unpadded CHW) -> plane buffer.
+         * The previous group's last GEN has finished (waited before its
+         * last compute), so the buffer is free. */
+        MMIO(ACT_CSR_ENABLE) = 0;
+        MMIO(ACT_CSR_LOOP) = 0;
+        MMIO(ACT_CSR_BASE) = SRC_ADDR + g * 8 * PLANE;
+        MMIO(ACT_CSR_LENGTH) = 8 * PLANE;
+        MMIO(ACT_CSR_ENABLE) = 1;
+        while (!MMIO(ACT_CSR_DRAINED)) {
+        }
+        MMIO(ACT_CSR_ENABLE) = 0; /* stop the reader once the planes are in */
+#endif
         while (!MMIO(WGT_CSR_DRAINED)) {
         }
 
@@ -120,6 +142,9 @@ void loom_dwgemm(void) {
         const int T = (OH * OW + 7) / 8;
         for (int t = 0; t <= T; ++t) {
             if (t > 0) {
+#if LINEGEN
+                (void)CFU_RD(7, 3, 0); /* tile t - 1's lines are in */
+#endif
                 /* Tile t - 1: first | last, keep the weight bank after the
                  * group's first tile. */
                 CFU_W(0, 0, 3 | (t > 1 ? 4 : 0), KG);
@@ -135,7 +160,14 @@ void loom_dwgemm(void) {
             }
             if (t < T) {
             int m0 = t * 8;
-#if GATHER
+#if LINEGEN
+            {
+                int oy = m0 / OW, ox0 = m0 % OW;
+                int iy0 = oy * STRIDE - PAD_T, ix0 = ox0 * STRIDE - PAD_L;
+                CFU_W(7, 2, ((u32)(iy0 * IW) & 0xFFFF) | (((u32)iy0 & 0x7FF) << 16),
+                      (u32)ix0 & 0xFFF);
+            }
+#elif GATHER
             CFU_W(6, 1, 0, 0);
             for (int cl = 0; cl < 8; ++cl) {
                 const u8 *plane = src + (g * 8 + cl) * PLANE;
@@ -212,4 +244,7 @@ void loom_dwgemm(void) {
             }
         }
     }
+#if LINEGEN
+    CFU_W(7, 1, 0, (u8)(ZP)); /* activation DMA back to the scratchpad */
+#endif
 }

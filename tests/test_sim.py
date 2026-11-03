@@ -114,6 +114,10 @@ def test_sim_mobilenet_layers_exact(sim_port):
         transport.close()
     log.info("mobilenet sim: %d cycles", result.cycles)
     wrong = {name: n for name, n in errors.items() if n}
+    if "mobilenet_conv_4" in debug:
+        import numpy as np
+        np.savez("/tmp/claude-1000/conv4_debug.npz", got=debug["mobilenet_conv_4"]["got"],
+                 want=debug["mobilenet_conv_4"]["want"])
     for name, info in debug.items():
         log.info("%s pack mismatches: tiles %s k_rows %s lanes %s", name,
                  info["tiles"][:40], info["k_rows"][:40], info["lanes"])

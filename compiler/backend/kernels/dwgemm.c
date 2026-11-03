@@ -90,7 +90,7 @@ void loom_dwgemm(void) {
 #if LINEGEN
     /* CFU LineGen geometry; plane-buffer mode routes the activation DMA into
      * its plane buffer for the whole kernel (cleared before returning). */
-    CFU_W(7, 0, IW | (IH << 10) | ((STRIDE == 2) << 20), PLANE);
+    CFU_W(7, 0, IW | (IH << 10) | ((STRIDE == 2) << 20) | ((OW == 4) << 21), PLANE);
     CFU_W(7, 1, 1, (u8)(ZP));
 #endif
 #if CFU_LUT_ADDR

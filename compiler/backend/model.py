@@ -419,11 +419,14 @@ def dwpack_defines(layer, tile: int = 8, *, dense_nchw: bool = False) -> dict[st
             "PLANE": ih * iw, "K": layer.k, "CHANNEL_MAJOR": int(not dense_nchw)}
 
 
-def linegen_ok(layer, tile: int = 8) -> bool:
+def linegen_ok(layer, tile: int = 8, features: frozenset = frozenset()) -> bool:
     """Depthwise 3x3 the CFU LineGen can im2col: 8-pixel tiles on one output
-    row (OW % 8 == 0), stride 1/2, and a group's 8 planes in its 8 KiB buffer."""
+    row (OW % 8 == 0) or, with `linegen_tworow`, two rows of a 4-wide output;
+    stride 1/2; a group's 8 planes in its 8 KiB buffer."""
     d = dwpack_defines(layer, tile)
-    return (d is not None and d["STRIDE"] in (1, 2) and d["OW"] % 8 == 0
+    two_row = "linegen_tworow" in features
+    return (d is not None and d["STRIDE"] in (1, 2)
+            and (d["OW"] % 8 == 0 or (two_row and d["OW"] == 4))
             and 8 * d["IH"] * d["IW"] <= 8192)
 
 
@@ -899,7 +902,7 @@ def _compile_quantized_mobilenet(
             nnxt = plan.layers[index + 2] if index + 2 < len(plan.layers) else None
             features = cfu_features(csr_json)
             if ("linegen" in features and "act_write" in features and result_lut
-                    and linegen_ok(nxt, tile) and padded_m == layer.m
+                    and linegen_ok(nxt, tile, features) and padded_m == layer.m
                     and _f1_fusable(nxt, nnxt)):
                 # Consumer im2col runs in the CFU from a DMA'd copy of the
                 # planes: unpadded CHW (one contiguous transfer per group).

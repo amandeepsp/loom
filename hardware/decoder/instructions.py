@@ -176,7 +176,7 @@ class WriteActInstruction(Instruction):
 class LineGenInstruction(Instruction):
     """funct3=7: hardware depthwise im2col (LineGen) control.
 
-    funct7=0: geometry: in0 = iw[0:10] | ih[10:20] | stride2[20];
+    funct7=0: geometry: in0 = iw[0:10] | ih[10:20] | stride2[20] | tworow[21];
               in1 = plane bytes [0:14].
     funct7=1: in0[0] = plane-buffer mode (activation DMA fills LineGen's
               plane buffer instead of the activation scratchpad);
@@ -191,6 +191,7 @@ class LineGenInstruction(Instruction):
     ih: Out(10)
     plane: Out(14)
     stride2: Out(1)
+    tworow: Out(1)
     zp: Out(8)
     planebuf_mode: Out(1)
     gen_start: Out(1)
@@ -212,6 +213,7 @@ class LineGenInstruction(Instruction):
                         self.iw.eq(self.in0[0:10]),
                         self.ih.eq(self.in0[10:20]),
                         self.stride2.eq(self.in0[20]),
+                        self.tworow.eq(self.in0[21]),
                         self.plane.eq(self.in1[0:14]),
                     ]
                 with m.Case(1):

@@ -7,7 +7,9 @@ the 72 activation lines the systolic array consumes, channel-major
 (line = c * 9 + ky * 3 + kx), byte r = input pixel
 (iy0 + ky, ix0 + kx + r * stride) of channel c, or the zero point when that
 is padding. Stride 1 makes one line per cycle; stride 2 takes two cycles
-(two contiguous 8-byte reads, even bytes kept).
+(two contiguous 8-byte reads, even bytes kept). Two-row mode serves 4-wide
+outputs (a tile is two output rows of 4 pixels): bytes 0..3 come from input
+row iy0 + ky, bytes 4..7 from the row `stride` further down, also two reads.
 
 The plane buffer is split into even / odd 64-bit word banks so the two
 consecutive words holding any 8 contiguous bytes are read in one cycle;
@@ -34,6 +36,7 @@ class LineGen(Component):
             "ih": In(10),
             "plane": In(14),
             "stride2": In(1),
+            "tworow": In(1),
             "zp": In(8),
             # GEN command: tile origin (input row iy0, its byte offset row0
             # within a plane = iy0 * iw, input column ix0 of output byte 0, kx 0).
@@ -77,8 +80,15 @@ class LineGen(Component):
         rowoff = Signal(signed(17))
         active = Signal()
 
+        two_reads = Signal()
+        m.d.comb += two_reads.eq(self.stride2 | self.tworow)
+        # Second read: next 8 bytes (stride 2) or `stride` rows down (two-row).
+        row_step = Signal(signed(12))
+        m.d.comb += row_step.eq(Mux(self.stride2, self.iw << 1, self.iw))
+        half_off = Signal(signed(13))
+        m.d.comb += half_off.eq(Mux(half, Mux(self.tworow, row_step, 8), 0))
         byte_addr = Signal(signed(18))
-        m.d.comb += byte_addr.eq(plane_base + rowoff + self.ix0 + kx + Mux(half, 8, 0))
+        m.d.comb += byte_addr.eq(plane_base + rowoff + self.ix0 + kx + half_off)
         word = Signal(signed(16))
         m.d.comb += word.eq(byte_addr >> 3)
         w_hi = Signal(idx_bits)
@@ -89,7 +99,8 @@ class LineGen(Component):
             m.d.comb += [rd_even.addr.eq(w_hi), rd_odd.addr.eq(w_hi)]
 
         iy = Signal(signed(12))
-        m.d.comb += iy.eq(self.iy0 + ky)
+        m.d.comb += iy.eq(self.iy0 + ky
+                          + Mux(half & self.tworow, Mux(self.stride2, 2, 1), 0))
         iy_ok = Signal()
         m.d.comb += iy_ok.eq((iy >= 0) & (iy < self.ih))
 
@@ -104,7 +115,7 @@ class LineGen(Component):
         s1_line = Signal(range(72))
         m.d.sync += [
             s1_valid.eq(active),
-            s1_last_half.eq(~self.stride2 | half),
+            s1_last_half.eq(~two_reads | half),
             s1_half.eq(half),
             s1_odd_first.eq(word[0]),
             s1_shift.eq(byte_addr[0:3]),
@@ -119,7 +130,7 @@ class LineGen(Component):
                 plane_base.eq(0), rowoff.eq(self.row0),
             ]
         with m.Elif(active):
-            with m.If(self.stride2 & ~half):
+            with m.If(two_reads & ~half):
                 m.d.sync += half.eq(1)
             with m.Else():
                 m.d.sync += [half.eq(0), line.eq(line + 1)]
@@ -152,27 +163,30 @@ class LineGen(Component):
             m.d.comb += got[i].eq(src[s1_shift + i])
 
         out = [Signal(8, name=f"out{r}") for r in range(8)]
-        held = Signal(32)  # stride 2: output bytes 0..3 from the first half
+        held = Signal(32)  # two-read modes: output bytes 0..3 from the first read
         for r in range(8):
-            # Input column of output byte r.
+            # Input column of output byte r (two-row: both halves use r % 4).
+            rr = r % 4
             ix_r = Signal(signed(14), name=f"ix{r}")
-            m.d.comb += ix_r.eq(s1_ix + Mux(self.stride2, 2 * r, r))
+            m.d.comb += ix_r.eq(s1_ix + Mux(self.tworow, Mux(self.stride2, 2 * rr, rr),
+                                            Mux(self.stride2, 2 * r, r)))
             ok = Signal(name=f"ok{r}")
             m.d.comb += ok.eq(s1_iy_ok & (ix_r >= 0) & (ix_r < self.iw))
             if r < 4:
-                # Stride 1: byte r of this read. Stride 2 (half 0): byte 2r.
+                # Stride 1: byte r. Stride 2 / two-row s2: byte 2r. Two-row s1: byte r.
                 raw = Mux(self.stride2, got[2 * r], got[r])
             else:
-                # Stride 2 (half 1): byte 2(r-4) of the second read.
-                raw = Mux(self.stride2, got[2 * (r - 4)], got[r])
+                # Single read (s1): byte r. Second read: byte (r-4)*stride.
+                raw = Mux(self.tworow, Mux(self.stride2, got[2 * (r - 4)], got[r - 4]),
+                          Mux(self.stride2, got[2 * (r - 4)], got[r]))
             m.d.comb += out[r].eq(Mux(ok, raw, self.zp))
-        with m.If(s1_valid & self.stride2 & ~s1_half):
+        with m.If(s1_valid & two_reads & ~s1_half):
             m.d.sync += held.eq(Cat(*out[0:4]))
 
         m.d.comb += [
             self.wr_en.eq(s1_valid & s1_last_half),
             self.wr_addr.eq(s1_line),
-            self.wr_data.eq(Mux(self.stride2, Cat(held, *out[4:8]), Cat(*out))),
+            self.wr_data.eq(Mux(two_reads, Cat(held, *out[4:8]), Cat(*out))),
         ]
         # busy also covers the stage-1 write still in flight.
         m.d.comb += self.busy.eq(active | self.start | s1_valid)

@@ -107,9 +107,6 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
         len(mr.k_regions) == 1
         and mr.k_regions[0].upper - mr.k_regions[0].lower <= mr.k_regions[0].step
     )
-    if (ctx.spec.keep_act and single_chunk and mr.upper <= mr.step
-            and region.upper - region.lower > region.step):
-        return _n_region_keep_act_ops(ctx, region)
     if (ctx.spec.keep_wgt and single_chunk and mr.upper >= 2 * mr.step):
         return _n_region_keep_wgt_prefetch_ops(ctx, region)
     if (ctx.spec.keep_wgt and single_chunk and mr.upper <= mr.step
@@ -212,17 +209,32 @@ def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) 
     nbytes = kr.k_count * ctx.spec.tile
     act, wgt = ctx.csr.act_dma, ctx.csr.wgt_dma
 
-    def kick(n_reg: SSAValue) -> list[Operation]:
+    # keep_act: the activations (identical for every N tile unless the
+    # GEMM is block-diagonal) are DMA'd once; flag bit 3 keeps their bank.
+    keep_act = ctx.spec.keep_act and not ctx.spec.input_n_k_offset
+
+    def kick(n_reg: SSAValue, with_act: bool) -> list[Operation]:
         m0 = rv32.LiOp(0)
         k0 = rv32.LiOp(kr.lower)
-        act_ops, act_addr = _activation_dma_addr(ctx.spec, m0.rd, k0.rd, n_reg)
         wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_reg, k0.rd)
-        return [m0, k0, *act_ops, *wgt_ops,
-                *_dma_kick_ops(act, act_addr, nbytes), *_dma_kick_ops(wgt, wgt_addr, nbytes)]
+        ops: list[Operation] = [m0, k0, *wgt_ops]
+        if with_act:
+            act_ops, act_addr = _activation_dma_addr(ctx.spec, m0.rd, k0.rd, n_reg)
+            ops += [*act_ops, *_dma_kick_ops(act, act_addr, nbytes)]
+        return [*ops, *_dma_kick_ops(wgt, wgt_addr, nbytes)]
 
     def n_body(n_iv: SSAValue) -> list[Operation]:
         k0 = rv32.LiOp(kr.lower)
         flags_ops, flags = _compute_flags(ctx.spec, kr, k0.rd)
+        if keep_act:
+            first_n = rv32.LiOp(region.lower)
+            delta = riscv.XorOp(n_iv, first_n.rd)
+            zero = rv32.LiOp(0)
+            not_first = riscv.SltuOp(zero.rd, delta.rd)
+            bit3 = riscv.SlliOp(not_first.rd, 3)
+            with_keep = riscv.AddOp(flags, bit3.rd)
+            flags_ops = [*flags_ops, first_n, delta, zero, not_first, bit3, with_keep]
+            flags = with_keep.rd
         k_count = rv32.LiOp(kr.k_count)
         n_next = riscv.AddiOp(n_iv, region.step)
         m0 = rv32.LiOp(0)
@@ -230,15 +242,15 @@ def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) 
             *_epilogue_ops(ctx, region.n_count, n_iv),
             k0, *flags_ops, k_count,
             loom_riscv.ComputeStartOp(flags, k_count.rd),
-            n_next, *kick(n_next.rd),
+            n_next, *kick(n_next.rd, with_act=not keep_act),
             loom_riscv.ComputeWaitOp(),
             m0, *_store_result_ops(ctx, region.n_count, m0.rd, n_iv),
-            *_dma_complete_ops(ctx.csr, [act, wgt]),
+            *_dma_complete_ops(ctx.csr, [wgt] if keep_act else [act, wgt]),
         ]
 
     n0 = rv32.LiOp(region.lower)
     return [
-        n0, *kick(n0.rd), *_dma_complete_ops(ctx.csr, [act, wgt]),
+        n0, *kick(n0.rd, with_act=True), *_dma_complete_ops(ctx.csr, [act, wgt]),
         *_for_ops(region.lower, region.upper, region.step, n_body),
         *_dma_stop_ops(act), *_dma_stop_ops(wgt),
     ]

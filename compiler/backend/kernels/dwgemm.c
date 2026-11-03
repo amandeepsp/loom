@@ -154,8 +154,13 @@ void loom_dwgemm(void) {
 #endif
                 for (int ky = 0; ky < 3; ++ky) {
                     u32 a0, a1, a2, b0, b1, b2;
+#if OW % 8 == 0
+                    (void)oy1, (void)ox1; /* same row: halves share words */
+                    chw3x3_row8(plane, oy0, ox0, ky, &a0, &a1, &a2, &b0, &b1, &b2);
+#else
                     chw3x3_row(plane, oy0, ox0, ky, &a0, &a1, &a2);
                     chw3x3_row(plane, oy1, ox1, ky, &b0, &b1, &b2);
+#endif
 #if CHANNEL_MAJOR
 #define LINE(kx) (cl * 9 + ky * 3 + (kx))
 #else

@@ -40,9 +40,12 @@ def compile_c_kernel(name: str, source: str, defines: dict[str, int]) -> bytes:
         text = Path(tmp) / f"{name}.text"
         cmd = [
             clang, "--target=riscv32", "-march=rv32im", "-mabi=ilp32", "-O2", "-mno-relax",
+            # In-order scheduling model: hoists loads away from their uses.
+            "-mtune=sifive-7-series",
             "-ffreestanding", "-fno-builtin", "-fno-jump-tables", "-fno-pic",
             "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
             *[f"-D{k}={v}" for k, v in defines.items()],
+            *os.environ.get("LOOM_CKERNEL_FLAGS", "").split(),
             f"-I{KERNEL_DIR}", "-c", str(KERNEL_DIR / source), "-o", str(obj),
         ]
         _run([str(c) for c in cmd])

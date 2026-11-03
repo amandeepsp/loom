@@ -32,7 +32,9 @@ def test_parse_qoperator_mobilenet_v1_025_plan():
     assert np.count_nonzero(depthwise.weight) <= 8 * 3 * 3
 
 
-def test_compile_mobilenet_emits_llvm_cpu_packers_and_cfu_gemms():
+def test_compile_mobilenet_emits_llvm_cpu_packers_and_cfu_gemms(monkeypatch):
+    # Baseline CFU (no optional features), independent of the installed bitstream.
+    monkeypatch.setenv("LOOM_CFU_FEATURES", "")
     compiled = compile_onnx_model(MODEL)
 
     assert len(compiled.kernels) == 29

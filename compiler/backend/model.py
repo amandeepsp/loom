@@ -419,6 +419,27 @@ def dwpack_defines(layer, tile: int = 8, *, dense_nchw: bool = False) -> dict[st
             "PLANE": ih * iw, "K": layer.k, "CHANNEL_MAJOR": int(not dense_nchw)}
 
 
+def chw_plane_stride(plane: int, *, group: int = 8, dcache: int = 4096,
+                     min_gap: int = 256) -> int:
+    """Channel stride for a CHW buffer read 8 planes at a time by dwgemm/dwpack.
+
+    The dcache is direct-mapped; planes a multiple of its size apart (e.g.
+    32x32 = 1024 B, so c and c + 4 collide) evict each other on every tile.
+    Pad the stride (32 B steps) until the group's planes sit >= min_gap
+    apart modulo the cache size.
+    """
+    def ok(stride: int) -> bool:
+        offs = sorted((c * stride) % dcache for c in range(group))
+        gaps = [(offs[(i + 1) % group] - offs[i]) % dcache for i in range(group)]
+        return min(gaps) >= min_gap
+    if plane * group <= dcache:
+        return plane  # the whole group fits in one cache-sized window
+    for extra in range(0, dcache, 32):
+        if ok(plane + extra):
+            return plane + extra
+    return plane
+
+
 def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
     """[taps * tile, C] stacked diagonal blocks in channel-major K order."""
     channels = layer.n
@@ -595,6 +616,7 @@ def _compile_quantized_mobilenet(
 
     fused_packs: dict[int, Buffer] = {}  # layer index -> packed buffer its producer fills
     mapped_inputs: dict[int, Buffer] = {}  # layer index -> LUT-mapped input its producer fills
+    chw_strides: dict[int, int] = {}  # layer index -> channel stride of its CHW input
     for index, layer in enumerate(plan.layers):
         transform_addr = 0
         if layer.input_transform is not None:
@@ -641,6 +663,8 @@ def _compile_quantized_mobilenet(
             pack_transform_addr = transform_addr
             lut_bytes = packing.input_h * packing.input_w * packing.channels
             dw_defines = dwpack_defines(layer, tile) if premapped is not None else None
+            if dw_defines is not None and index in chw_strides:
+                dw_defines["PLANE"] = chw_strides[index]
             if dw_defines is None and not transform_addr:
                 dw_defines = dwpack_defines(layer, tile, dense_nchw=True)
             if premapped is not None:
@@ -802,8 +826,11 @@ def _compile_quantized_mobilenet(
                 and nxt.packing.channels == layer.n):
             # F3: store LUT-mapped results row-major into the next layer's
             # pack source, replacing its separate lut_map pass.
+            if dwpack_defines(nxt, tile) is not None and padded_m == layer.m:
+                chw_stride = chw_plane_stride(padded_m)  # consumer's dwpack reads CHW
+                chw_strides[index + 1] = chw_stride
             mapped = planner.add(_buffer_name(index + 1, "input_lut_mapped"),
-                                 padded_m * layer.n, "activation")
+                                 (chw_stride or padded_m) * layer.n, "activation")
             mapped_inputs[index + 1] = mapped
             lut = np.asarray(nxt.input_transform, dtype=np.int8)
             offsets = np.arange(-128, 256)
@@ -812,8 +839,6 @@ def _compile_quantized_mobilenet(
                                     "constant.requant_lut", rebased.astype(np.int8).tobytes())
             output_addr, fused_lut_addr = mapped.addr, store_lut.addr
             cfu_lut_addr = _cfu_lut(planner, index + 1, lut, result_lut)
-            if dwpack_defines(nxt, tile) is not None and padded_m == layer.m:
-                chw_stride = padded_m  # consumer's dwpack reads CHW
         target_spec = GemmTargetSpec(
             output_channel_stride=chw_stride,
             result_lut=result_lut,

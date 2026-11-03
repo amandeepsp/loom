@@ -156,7 +156,7 @@ def main() -> int:
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "label": args.label,
         "rev": git_rev(),
-        "cfu_features": sorted(__import__("compiler.backend.target", fromlist=["cfu_features"]).cfu_features()),
+        "cfu_features": sorted(__import__("compiler.backend.target", fromlist=["cfu_features"]).cfu_features(args.csr_json)),
         "csr_json": args.csr_json,
         "model": args.model,
         "images": args.images,

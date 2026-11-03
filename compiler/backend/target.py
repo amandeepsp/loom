@@ -100,14 +100,20 @@ class GemmTargetSpec:
         )
 
 
-def cfu_features() -> frozenset[str]:
-    """CFU features the target bitstream supports, from $LOOM_CFU_FEATURES.
+def cfu_features(csr_json=None) -> frozenset[str]:
+    """CFU features the target bitstream supports.
 
-    Comma-separated: `packed_read` (READ_RESULT funct7=1), `keep_wgt`
-    (compute flag bit 2), `keep_act` (compute flag bit 3). Off by default: on older bitstreams these
-    instructions/flags are ignored and would silently corrupt results.
+    Comma-separated names: `packed_read` (READ_RESULT funct7=1), `keep_wgt`
+    (compute flag bit 2), `keep_act` (compute flag bit 3). Taken from
+    $LOOM_CFU_FEATURES if set, else from a `loom_cfu_features` file next to
+    the bitstream's csr.json (written by `just soc`). Absent means none:
+    older bitstreams ignore these and would silently compute garbage.
     """
     import os
+    from pathlib import Path
 
-    raw = os.environ.get("LOOM_CFU_FEATURES", "")
-    return frozenset(f.strip() for f in raw.split(",") if f.strip())
+    raw = os.environ.get("LOOM_CFU_FEATURES")
+    if raw is None and csr_json is not None:
+        marker = Path(csr_json).parent / "loom_cfu_features"
+        raw = marker.read_text() if marker.exists() else ""
+    return frozenset(f.strip() for f in (raw or "").replace("\n", ",").split(",") if f.strip())

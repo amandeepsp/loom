@@ -776,9 +776,9 @@ def _compile_quantized_mobilenet(
             activation_max=layer.activation_max,
             cfu_word_bits=cfu_word_bits,
             cfu_store_depth_words=cfu_store_depth_words,
-            packed_read="packed_read" in cfu_features(),
-            keep_wgt="keep_wgt" in cfu_features(),
-            keep_act="keep_act" in cfu_features(),
+            packed_read="packed_read" in cfu_features(csr_json),
+            keep_wgt="keep_wgt" in cfu_features(csr_json),
+            keep_act="keep_act" in cfu_features(csr_json),
             input_k_stride=layer.k if taps is not None else 0,
             input_n_k_offset=taps or 0,
         )

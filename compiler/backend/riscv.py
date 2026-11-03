@@ -176,6 +176,10 @@ def srli(rd: int, rs1: int, shamt: int) -> int:
     return encode_i_type(opcode=0x13, funct3=5, rd=rd, rs1=rs1, imm=shamt)
 
 
+def sltu(rd: int, rs1: int, rs2: int) -> int:
+    return encode_r_type(opcode=0x33, funct3=3, funct7=0, rd=rd, rs1=rs1, rs2=rs2)
+
+
 def sltiu(rd: int, rs1: int, imm: int) -> int:
     return encode_i_type(opcode=0x13, funct3=3, rd=rd, rs1=rs1, imm=imm)
 

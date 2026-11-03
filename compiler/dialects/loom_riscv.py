@@ -147,6 +147,28 @@ class WriteConfigOp(LoomCustom0Op):
 
 
 @irdl_op_definition
+class ReadResult4Op(LoomCustom0Op):
+    """Read four consecutive int8 result lanes (index multiple of 4), packed
+    little-endian into one register (READ_RESULT funct7=1, Batch A CFU)."""
+
+    name = "loom_riscv.read_result4"
+
+    index = operand_def(riscv.IntRegisterType)
+    rd = result_def(riscv.IntRegisterType)
+
+    def __init__(
+        self,
+        index: SSAValue | Operation,
+        *,
+        rd: riscv.IntRegisterType = riscv.Registers.UNALLOCATED_INT,
+    ):
+        super().__init__(operands=[index], result_types=[rd])
+
+    def custom0_operands(self) -> tuple[int, int, int, int, int]:
+        return (4, 1, _reg_index(self.rd.type), _reg_index(self.index.type), 0)
+
+
+@irdl_op_definition
 class ReadResultOp(LoomCustom0Op):
     """Read one int8 result lane from the CFU result buffer."""
 
@@ -189,6 +211,7 @@ LoomRISCV = Dialect(
         WriteEpilogueParamOp,
         WriteConfigOp,
         ReadResultOp,
+        ReadResult4Op,
     ],
     [],
 )

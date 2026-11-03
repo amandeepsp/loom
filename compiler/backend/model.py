@@ -46,7 +46,7 @@ from shared.layout import align_up, pack_weight_rows
 from .cpu import compile_c_kernel, emit_lut_map, emit_pack_2d_to_tiles_op, emit_pack_conv2d_to_tiles_op
 from .riscv_ir import RiscvLoweringContext, lower_affine_kernel_to_riscv_scf
 from .riscv_ir_encode import encode_riscv_module
-from .target import CsrMap, GemmTargetSpec
+from .target import CsrMap, GemmTargetSpec, cfu_features
 from .rewrites import (
     PackFunctionBinding,
     PlannedGemmReplacement,
@@ -776,6 +776,8 @@ def _compile_quantized_mobilenet(
             activation_max=layer.activation_max,
             cfu_word_bits=cfu_word_bits,
             cfu_store_depth_words=cfu_store_depth_words,
+            packed_read="packed_read" in cfu_features(),
+            keep_wgt="keep_wgt" in cfu_features(),
             input_k_stride=layer.k if taps is not None else 0,
             input_n_k_offset=taps or 0,
         )

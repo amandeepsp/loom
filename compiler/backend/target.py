@@ -78,6 +78,9 @@ class GemmTargetSpec:
     # M tile (default: k), and N tile n reads rows starting at n * input_n_k_offset.
     input_k_stride: int = 0
     input_n_k_offset: int = 0
+    # Optional CFU features (Batch A bitstreams only; see cfu_features()).
+    packed_read: bool = False
+    keep_wgt: bool = False
     # Fused store: write results straight into the next layer's packed tile
     # layout ([m/tile][n][tile]) through a 384-byte rebased requant LUT,
     # replacing the next layer's separate pack step.
@@ -94,3 +97,16 @@ class GemmTargetSpec:
             cfu_word_bits=self.cfu_word_bits,
             cfu_store_depth_words=self.cfu_store_depth_words,
         )
+
+
+def cfu_features() -> frozenset[str]:
+    """CFU features the target bitstream supports, from $LOOM_CFU_FEATURES.
+
+    Comma-separated: `packed_read` (READ_RESULT funct7=1), `keep_wgt`
+    (compute flag bit 2). Off by default: on older bitstreams these
+    instructions/flags are ignored and would silently corrupt results.
+    """
+    import os
+
+    raw = os.environ.get("LOOM_CFU_FEATURES", "")
+    return frozenset(f.strip() for f in raw.split(",") if f.strip())

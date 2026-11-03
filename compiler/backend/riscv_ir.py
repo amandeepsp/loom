@@ -84,6 +84,30 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
         # Epilogue params depend only on the N tile and live in a CFU memory
         # that nothing else writes, so upload them once per N tile rather
         # than once per (M, N) tile.
+        mr = region.m_region
+        single_chunk = (
+            len(mr.k_regions) == 1
+            and mr.k_regions[0].upper - mr.k_regions[0].lower <= mr.k_regions[0].step
+        )
+        if ctx.spec.keep_wgt and single_chunk and mr.upper > mr.step:
+            # Weights for this N tile are DMA'd once, before the M loop. Every
+            # M tile then DMAs activations only; the first compute swaps both
+            # banks, later ones keep the weight bank (flag bit 2 = m > 0).
+            kr = mr.k_regions[0]
+            k0 = rv32.LiOp(kr.lower)
+            wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_iv, k0.rd)
+            return [
+                *_epilogue_ops(ctx, region.n_count, n_iv),
+                k0,
+                *wgt_ops,
+                *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, kr.k_count * ctx.spec.tile),
+                *_for_ops(
+                    0,
+                    mr.upper,
+                    mr.step,
+                    lambda m_iv: _m_region_body(ctx, region.n_count, mr, n_iv, m_iv, keep_wgt=True),
+                ),
+            ]
         return [
             *_epilogue_ops(ctx, region.n_count, n_iv),
             *_for_ops(
@@ -103,6 +127,8 @@ def _m_region_body(
     region: MRegion,
     n_iv: SSAValue,
     m_iv: SSAValue,
+    *,
+    keep_wgt: bool = False,
 ) -> list[Operation]:
     out: list[Operation] = []
     for k_region in region.k_regions:
@@ -111,7 +137,7 @@ def _m_region_body(
                 k_region.lower,
                 k_region.upper,
                 k_region.step,
-                lambda k_iv: _k_body(ctx, k_region, n_iv, m_iv, k_iv),
+                lambda k_iv, kr=k_region: _k_body(ctx, kr, n_iv, m_iv, k_iv, keep_wgt=keep_wgt),
             )
         )
     out.append(loom_riscv.ComputeWaitOp())
@@ -125,16 +151,33 @@ def _k_body(
     n_iv: SSAValue,
     m_iv: SSAValue,
     k_iv: SSAValue,
+    *,
+    keep_wgt: bool = False,
 ) -> list[Operation]:
     act_addr_ops, act_addr = _activation_dma_addr(ctx.spec, m_iv, k_iv, n_iv)
-    wgt_addr_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_iv, k_iv)
     flags_ops, flags = _compute_flags(ctx.spec, region, k_iv)
     k_count = rv32.LiOp(region.k_count)
+    nbytes = region.k_count * ctx.spec.tile
+    if keep_wgt:
+        # Weight DMA was issued once before the M loop; set flag bit 2 (keep
+        # the weight bank) for every M tile after the first.
+        zero = rv32.LiOp(0)
+        not_first = riscv.SltuOp(zero.rd, m_iv)
+        bit2 = riscv.SlliOp(not_first.rd, 2)
+        keep = riscv.AddOp(flags, bit2.rd)
+        flags_ops = [*flags_ops, zero, not_first, bit2, keep]
+        flags = keep.rd
+        dma_ops = [*act_addr_ops, *_dma_kick_ops(ctx.csr.act_dma, act_addr, nbytes)]
+    else:
+        wgt_addr_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_iv, k_iv)
+        dma_ops = [
+            *act_addr_ops,
+            *wgt_addr_ops,
+            *_dma_kick_ops(ctx.csr.act_dma, act_addr, nbytes),
+            *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, nbytes),
+        ]
     return [
-        *act_addr_ops,
-        *wgt_addr_ops,
-        *_dma_kick_ops(ctx.csr.act_dma, act_addr, region.k_count * ctx.spec.tile),
-        *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, region.k_count * ctx.spec.tile),
+        *dma_ops,
         loom_riscv.WaitPreviousComputeOp(k_iv),
         *_dma_complete_ops(ctx.csr),
         *_dma_stop_ops(ctx.csr.act_dma),
@@ -215,6 +258,8 @@ def _store_result_tile_unrolled(
     if spec.store_lut_addr:
         lut = rv32.LiOp(spec.store_lut_addr + 128)
         out.append(lut)
+    if spec.packed_read and n_count == spec.tile and spec.tile % 4 == 0:
+        return out + _store_tile_packed_reads(spec, base, lut)
     for r in range(spec.tile):
         for col in range(n_count):
             index = rv32.LiOp(r * spec.tile + col)
@@ -228,6 +273,42 @@ def _store_result_tile_unrolled(
                 value = mapped.rd
             imm = col * spec.tile + r if spec.packed_output_addr else r * spec.n + col
             out.append(riscv.SbOp(base.rd, value, imm))
+    return out
+
+
+def _store_tile_packed_reads(spec: GemmTargetSpec, base: Operation, lut) -> list[Operation]:
+    """Full-width tile store using READ_RESULT4 (4 results per CFU read).
+
+    Row-major without LUT: each word is stored as-is (2 sw per row). With a
+    LUT or the packed (F1) layout, bytes are extracted with shifts (zero-
+    extended; the rebased LUT accepts zero-extended indices).
+    """
+    out: list[Operation] = []
+    for r in range(spec.tile):
+        for group in range(0, spec.tile, 4):
+            index = rv32.LiOp(r * spec.tile + group)
+            word = loom_riscv.ReadResult4Op(index.rd)
+            out += [index, word]
+            if lut is None and not spec.packed_output_addr:
+                out.append(riscv.SwOp(base.rd, word.rd, r * spec.n + group))
+                continue
+            for b in range(4):
+                col = group + b
+                if b == 3:
+                    byte = riscv.SrliOp(word.rd, 24)
+                    out.append(byte)
+                else:
+                    hi = riscv.SlliOp(word.rd, 24 - 8 * b)
+                    byte = riscv.SrliOp(hi.rd, 24)
+                    out += [hi, byte]
+                value = byte.rd
+                if lut is not None:
+                    addr = riscv.AddOp(lut.rd, byte.rd)
+                    mapped = riscv.LbuOp(addr.rd, 0)
+                    out += [addr, mapped]
+                    value = mapped.rd
+                imm = col * spec.tile + r if spec.packed_output_addr else r * spec.n + col
+                out.append(riscv.SbOp(base.rd, value, imm))
     return out
 
 
@@ -511,14 +592,14 @@ def _dma_wait_loop(done_addr: int) -> Operation:
     return riscv_scf.WhileOp((), (), Region(before), Region(after))
 
 
-def _dma_complete_ops(csr) -> list[Operation]:
-    """Wait until both DMA transfers have fully landed in the scratchpads."""
-    if csr.act_dma.drained is not None and csr.wgt_dma.drained is not None:
+def _dma_complete_ops(csr, *, act_only: bool = False) -> list[Operation]:
+    """Wait until the issued DMA transfers have fully landed in the scratchpads."""
+    regs = [csr.act_dma] if act_only else [csr.act_dma, csr.wgt_dma]
+    if all(r.drained is not None for r in regs):
         # Hardware reports delivery directly; no delay fence required.
-        return [_dma_wait_loop(csr.act_dma.drained), _dma_wait_loop(csr.wgt_dma.drained)]
+        return [_dma_wait_loop(r.drained) for r in regs]
     return [
-        _dma_wait_loop(csr.act_dma.done),
-        _dma_wait_loop(csr.wgt_dma.done),
+        *(_dma_wait_loop(r.done) for r in regs),
         *_dma_drain_fence_ops(csr.act_dma.done),
     ]
 

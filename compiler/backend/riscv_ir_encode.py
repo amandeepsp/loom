@@ -114,6 +114,12 @@ class _RiscvModuleEncoder:
                 rd = self._define(op.rd)
                 self.builder.emit(riscv.srli(rd, rs1, int(op.immediate.value.data)))
                 self._finish_op(op)
+            case xdsl_riscv.SltuOp():
+                rs1 = self._use(op.rs1)
+                rs2 = self._use(op.rs2)
+                rd = self._define(op.rd)
+                self.builder.emit(riscv.sltu(rd, rs1, rs2))
+                self._finish_op(op)
             case xdsl_riscv.SltiuOp():
                 rs1 = self._use(op.rs1)
                 rd = self._define(op.rd)
@@ -175,6 +181,11 @@ class _RiscvModuleEncoder:
                         value_reg=value,
                     ).encode()
                 )
+                self._finish_op(op)
+            case loom_riscv.ReadResult4Op():
+                index = self._use(op.index)
+                rd = self._define(op.rd)
+                self.builder.emit(riscv.custom0(4, 1, rd=rd, rs1=index, rs2=0).encode())
                 self._finish_op(op)
             case loom_riscv.ReadResultOp():
                 index = self._use(op.index)

@@ -263,7 +263,8 @@ fn flushDataCaches() void {
     flushL2Cache();
 }
 
-const config_l2_size: usize = if (@hasDecl(csr, "config_l2_size")) @intCast(csr.config_l2_size) else 128;
+// LiteX omits config_l2_size when the SoC has no L2.
+const config_l2_size: usize = if (@hasDecl(csr, "config_l2_size")) @intCast(csr.config_l2_size) else 0;
 
 fn flushL2Cache() void {
     if (config_l2_size == 0) return;

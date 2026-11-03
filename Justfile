@@ -36,12 +36,19 @@ default:
 verilog:
     uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }}
 
-# Build the LiteX SoC + bitstream for the Tang Nano 20K (slow).
-soc: verilog
+# CFU features the current RTL implements (see compiler/backend/target.py).
+cfu_features := "packed_read,keep_wgt,keep_act"
+soc_baud := "1000000"
+
+# Build the LiteX SoC + bitstream for the Tang Nano 20K (slow, ~30-40 min).
+# Gowin placement is seed-sensitive: try `just soc seed=11` if it fails, and
+# always gate a new bitstream (python -m tools.perf_loop) before flashing.
+soc seed="2": verilog
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
-        --build --toolchain apicula --pnr-seed 2 \
+        --build --toolchain apicula --pnr-seed {{ seed }} \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \
-        {{ _cfu_args }} --with-cfu-led-debug
+        {{ _cfu_args }} --with-cfu-led-debug --uart-baudrate {{ soc_baud }}
+    echo "{{ cfu_features }}" > {{ hw_dir }}/loom_cfu_features
 
 # Generate the simulation SoC (csr.json, BIOS) without compiling gateware.
 sim-soc: verilog

@@ -212,6 +212,7 @@ class Top(Cfu):
             seq.first.eq(i_cs.seq_first),
             seq.last.eq(i_cs.seq_last),
             seq.keep_wgt.eq(i_cs.seq_keep_wgt),
+            seq.keep_act.eq(i_cs.seq_keep_act),
             seq.k_count.eq(i_cs.seq_k_count),
             seq.start.eq(i_cs.seq_start),
         ]

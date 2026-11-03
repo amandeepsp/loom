@@ -440,3 +440,43 @@ class TestBatchA:
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
         sim.run()
+
+
+class TestKeepAct:
+    def test_activation_reuse_across_n_tiles(self):
+        ROWS, COLS, K = 4, 4, 2
+        rng = np.random.default_rng(2)
+        A = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B1 = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+        B2 = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+
+        def expected(B):
+            C = A.astype(np.int32) @ B.astype(np.int32)
+            return [ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127)
+                    for r in range(ROWS) for c in range(COLS)]
+
+        act = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = lambda B: [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        dut = Top(TopConfig(rows=4, cols=4))
+
+        async def testbench(ctx):
+            n = ROWS * COLS
+            await write_per_channel_params(ctx, dut, [0] * n, [0x7FFFFFFF] * n, [0] * n)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await dma_fill(ctx, dut.dma_act, act)
+            await dma_fill(ctx, dut.dma_wgt, wgt(B1))
+            await run_tile(ctx, dut, k=K, first=True, last=True)
+            for i, e in enumerate(expected(B1)):
+                assert to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0)) == e
+            # New weights only; keep_act (bit 3) reuses the activation bank.
+            await dma_fill(ctx, dut.dma_wgt, wgt(B2))
+            await cfu_op(ctx, dut, funct3=0, funct7=0, in0=0b1011, in1=K)
+            await cfu_op(ctx, dut, funct3=1, funct7=0, in0=0, in1=0)
+            for i, e in enumerate(expected(B2)):
+                assert to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0)) == e
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()

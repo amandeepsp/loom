@@ -9,6 +9,7 @@ class ComputeStartInstruction(Instruction):
     seq_first: Out(1)
     seq_last: Out(1)
     seq_keep_wgt: Out(1)
+    seq_keep_act: Out(1)
     seq_k_count: Out(10)
     seq_start: Out(1)
 
@@ -22,6 +23,9 @@ class ComputeStartInstruction(Instruction):
                 # Keep the weight bank (no swap): consecutive M tiles of one
                 # N tile reuse the weights already in the compute bank.
                 self.seq_keep_wgt.eq(self.in0[2]),
+                # Keep the activation bank: consecutive N tiles of one M tile
+                # reuse the activations already in the compute bank.
+                self.seq_keep_act.eq(self.in0[3]),
                 self.seq_k_count.eq(self.in1),
             ]
 

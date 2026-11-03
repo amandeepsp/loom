@@ -58,6 +58,7 @@ class OSSequencer(wiring.Component):
         ports["first"] = In(1)
         ports["last"] = In(1)
         ports["keep_wgt"] = In(1)
+        ports["keep_act"] = In(1)
         ports["state_debug"] = Out(8)
         ports["busy_debug"] = Out(1)
         ports["first_latch_debug"] = Out(1)
@@ -109,6 +110,7 @@ class OSSequencer(wiring.Component):
         # we re-enter PRIME from DONE without a fresh start pulse.
         first_latch = Signal()
         keep_wgt_latch = Signal()
+        keep_act_latch = Signal()
 
         with m.FSM(name="fsm") as fsm:
             with m.State("IDLE"):
@@ -117,6 +119,7 @@ class OSSequencer(wiring.Component):
                     m.d.sync += cycle.eq(0)
                     m.d.sync += first_latch.eq(self.first)
                     m.d.sync += keep_wgt_latch.eq(self.keep_wgt)
+                    m.d.sync += keep_act_latch.eq(self.keep_act)
                     # Always go through PRIME so the bank is swapped to the
                     # freshly DMA-filled side and the read address is primed
                     # to 0 (sync-read latency).  psum_load is gated by `first`
@@ -127,7 +130,7 @@ class OSSequencer(wiring.Component):
                 m.d.comb += self.arr_psum_load.eq(first_latch)
                 m.d.comb += self.act_rd_addr.eq(0)
                 m.d.comb += self.wgt_rd_addr.eq(0)
-                m.d.comb += self.act_swap.eq(1)
+                m.d.comb += self.act_swap.eq(~keep_act_latch)
                 m.d.comb += self.wgt_swap.eq(~keep_wgt_latch)
                 m.next = "FEED"
 
@@ -184,6 +187,7 @@ class OSSequencer(wiring.Component):
                     m.d.sync += cycle.eq(0)
                     m.d.sync += first_latch.eq(self.first)
                     m.d.sync += keep_wgt_latch.eq(self.keep_wgt)
+                    m.d.sync += keep_act_latch.eq(self.keep_act)
                     m.next = "PRIME"
 
         class SeqState(IntEnum):

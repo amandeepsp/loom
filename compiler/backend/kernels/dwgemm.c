@@ -109,7 +109,22 @@ void loom_dwgemm(void) {
 #ifndef GATHER
 #define GATHER 0
 #endif
-        for (int t = 0; t < (OH * OW + 7) / 8; ++t) {
+        /* Software pipeline: tile t's lines go into the fill bank while
+         * tile t - 1 computes on the other bank. */
+        const int T = (OH * OW + 7) / 8;
+        for (int t = 0; t <= T; ++t) {
+            if (t > 0) {
+                /* Tile t - 1: first | last, keep the weight bank after the
+                 * group's first tile. */
+                CFU_W(0, 0, 3 | (t > 1 ? 4 : 0), KG);
+                /* The start pulse is registered a cycle late: give it time to
+                 * reach PRIME (bank swap) before the next WRITE_ACT, and keep
+                 * COMPUTE_WAIT off the previous tile's latched done. */
+#ifndef DWGEMM_HOST_TEST
+                asm volatile("nop\n\tnop\n\tnop\n\tnop");
+#endif
+            }
+            if (t < T) {
             int m0 = t * 8;
 #if GATHER
             CFU_W(6, 1, 0, 0);
@@ -153,17 +168,11 @@ void loom_dwgemm(void) {
                 }
             }
 #endif /* GATHER */
-            /* first | last, plus keep the weight bank after the first tile. */
-            CFU_W(0, 0, 3 | (t ? 4 : 0), KG);
-            /* COMPUTE_WAIT right after START can see the previous tile's
-             * latched done (the sequencer start pulse is registered a cycle
-             * late, see top.py); keep a few instructions between them. */
-#ifndef DWGEMM_HOST_TEST
-            asm volatile("nop\n\tnop\n\tnop\n\tnop");
-#endif
+            }
+            if (t == 0) continue;
             (void)CFU_RD(1, 0, 0);
 
-            u8 *dst = (u8 *)OUT_ADDR + m0 * MSTRIDE + g * 8 * CSTRIDE;
+            u8 *dst = (u8 *)OUT_ADDR + (t - 1) * 8 * MSTRIDE + g * 8 * CSTRIDE;
             for (int col = 0; col < 8; ++col) {
                 u32a *p = (u32a *)(dst + col * CSTRIDE);
                 p[0] = CFU_RD(4, 2, col);

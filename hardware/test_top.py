@@ -480,14 +480,3 @@ class TestKeepAct:
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
         sim.run()
-
-
-def test_gowin_dsp_verilog_uses_mult9x9_output_register():
-    from hardware.top import TopConfig, write_verilog
-    import tempfile, os
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "top.v")
-        write_verilog(TopConfig(rows=2, cols=2, gowin_dsp=True), path)
-        v = open(path).read()
-    assert v.count("MULT9X9") >= 4
-    assert ".OUT_REG(" in v

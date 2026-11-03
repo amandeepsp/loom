@@ -26,12 +26,11 @@ class OutputStationaryPEArray(wiring.Component):
       psum_load       - reset all accumulators
     """
 
-    def __init__(self, num_rows: int, num_cols: int, in_width=8, acc_width=32, gowin_dsp=False):
+    def __init__(self, num_rows: int, num_cols: int, in_width=8, acc_width=32):
         self.num_rows = num_rows
         self.num_cols = num_cols
         self.in_width = in_width
         self.acc_width = acc_width
-        self.gowin_dsp = gowin_dsp
 
         ports = {}
         for r in range(num_rows):
@@ -65,7 +64,7 @@ class OutputStationaryPEArray(wiring.Component):
                 getattr(self, f"w_in_{c}"))
 
         # PEs
-        pes = [[OutputStationaryPE(self.in_width, self.acc_width, self.gowin_dsp)
+        pes = [[OutputStationaryPE(self.in_width, self.acc_width)
                 for _ in range(cols)] for _ in range(rows)]
 
         for r in range(rows):

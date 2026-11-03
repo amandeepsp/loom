@@ -126,6 +126,11 @@ def run_gemm(
 
     expected = case.expected()
     delta = np.abs(run.output.astype(np.int32) - expected.astype(np.int32))
+    if delta.any():
+        rows, cols = np.nonzero(delta)
+        tiles = sorted({(int(r) // 8, int(c) // 8) for r, c in zip(rows, cols)})
+        log.info("mismatches at %d positions; (m_tile, n_tile) affected: %s; first: %s",
+                 len(rows), tiles, list(zip(rows[:8].tolist(), cols[:8].tolist())))
     return GemmResult(
         m=m, k=k, n=n,
         cycles=run.cycles,

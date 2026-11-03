@@ -11,6 +11,9 @@
  */
 #include <stdint.h>
 
+#ifndef PACKED_OUT
+#define PACKED_OUT 0
+#endif
 #ifndef UNIFORM
 #define UNIFORM 0
 #endif
@@ -69,7 +72,16 @@ void loom_blockdiag(void) {
 #else
             i32 v = rdbpot(srdhm(acc + bias[c], mult[c]), shift[c]) + OUT_ZP;
 #endif
-            dst[row * C + c] = (i8)(v < ACT_MIN ? ACT_MIN : v > ACT_MAX ? ACT_MAX : v);
+            i8 out = (i8)(v < ACT_MIN ? ACT_MIN : v > ACT_MAX ? ACT_MAX : v);
+#if PACKED_OUT
+            /* Next layer's packed tiles ([M/TILE][C][TILE]) via its input LUT. */
+#if OUT_LUT_ADDR
+            out = ((const i8 *)OUT_LUT_ADDR)[out + 128];
+#endif
+            dst[(row / TILE) * C * TILE + c * TILE + row % TILE] = out;
+#else
+            dst[row * C + c] = out;
+#endif
         }
     }
 }

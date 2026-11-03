@@ -43,16 +43,17 @@ def test_compile_mobilenet_emits_llvm_cpu_packers_and_cfu_gemms(monkeypatch):
     # pack + GEMM per layer, plus a one-pass LUT pre-map for each 3x3 depthwise.
     # The global average pool runs as a direct CPU kernel (no pack function).
     assert sum(k.kind == "global_average_pool_cpu" for k in compiled.kernels) == 1
-    # Pointwise convs get their input packed by the previous GEMM's store.
+    # Pointwise convs get their input packed by the previous GEMM's store,
+    # and the classifier by the pool kernel's store.
     fused = [k for k in compiled.kernels if k.packed_by]
-    assert len(fused) == 13
+    assert len(fused) == 14
     assert len(names) - len(lut_maps) == 58 - 1 - len(fused)
     # The LUT is applied in the producer GEMM's store (row-major), not a pre-pass.
     assert len(lut_maps) == 0
     assert sum(1 for k in compiled.kernels if k.input_mapped_by) == 13
     assert all(function.code and len(function.code) % 4 == 0 for function in compiled.functions)
     ops = tuple(compiled.loom_module.body.block.ops)
-    assert len(ops) == 58 - 2 - 13  # pool: no loom pack/GEMM ops; fused: no pack ops
+    assert len(ops) == 58 - 2 - 14  # pool: no loom pack/GEMM ops; fused: no pack ops
     assert isinstance(ops[0], PackConv2DToTilesOp)
     assert isinstance(ops[1], GemmOp)
     assert isinstance(ops[2], PackConv2DToTilesOp)  # depthwise im2col

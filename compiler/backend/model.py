@@ -799,8 +799,25 @@ def _compile_quantized_mobilenet(
             layer.shift.astype("<i4", copy=False).tobytes(),
         )
         if cpu_taps is not None:
+            # F1 for the CPU kernel: write straight into the next layer's
+            # packed tile layout through its input LUT (no separate pack).
+            nxt = plan.layers[index + 1] if index + 1 < len(plan.layers) else None
+            out_defines: dict[str, int] = {"DST_ADDR": output.addr}
+            if (nxt is not None and nxt.packing is None and nxt.kind in ("conv2d", "gemm")
+                    and nxt.k == layer.n and nxt.m == layer.m
+                    and block_diagonal_2d_taps(nxt) is None):
+                fused = planner.add(_buffer_name(index + 1, "input_packed"),
+                                    align_up(nxt.m, tile) * nxt.k, "activation_packed")
+                fused_packs[index + 1] = fused
+                out_lut_addr = 0
+                if nxt.input_transform is not None:
+                    out_lut_addr = planner.add(
+                        _buffer_name(index + 1, "out_lut"), 256, "constant.requant_lut",
+                        np.asarray(nxt.input_transform, np.int8).tobytes()).addr
+                out_defines = {"DST_ADDR": fused.addr, "PACKED_OUT": 1,
+                               "OUT_LUT_ADDR": out_lut_addr, "TILE": tile}
             code = compile_c_kernel(layer.name, "blockdiag.c", {
-                "SRC_ADDR": source.addr, "DST_ADDR": output.addr,
+                "SRC_ADDR": source.addr, **out_defines,
                 "WGT_ADDR": weight_buffer.addr, "BIAS_ADDR": bias_buffer.addr,
                 "MULT_ADDR": multiplier_buffer.addr, "SHIFT_ADDR": shift_buffer.addr,
                 "LUT_ADDR": transform_addr, "M": layer.m, "C": layer.n, "TAPS": cpu_taps,

@@ -90,7 +90,13 @@ void loom_dwgemm(void) {
 #if LINEGEN
     /* CFU LineGen geometry; plane-buffer mode routes the activation DMA into
      * its plane buffer for the whole kernel (cleared before returning). */
-    CFU_W(7, 0, IW | (IH << 10) | ((STRIDE == 2) << 20) | ((OW == 4) << 21), PLANE);
+    /* rowwise for 4- / 2-wide outputs (a tile spans 2 / 4 output rows);
+     * reads per line 1, 2 (stride 2 or 4-wide) or 4 (2-wide); dense
+     * tap-major lines over C planes for an ordinary 3x3 conv. */
+    CFU_W(7, 0, IW | (IH << 10) | ((STRIDE == 2) << 20) | ((OW < 8) << 21)
+                    | ((OW >= 8 ? (STRIDE == 2) : OW == 4 ? 1 : 2) << 22)
+                    | ((!CHANNEL_MAJOR) << 24) | ((CHANNEL_MAJOR ? 0 : C) << 25),
+          PLANE);
     CFU_W(7, 1, 1, (u8)(ZP));
 #endif
 #if CFU_LUT_ADDR
@@ -124,8 +130,13 @@ void loom_dwgemm(void) {
          * last compute), so the buffer is free. */
         MMIO(ACT_CSR_ENABLE) = 0;
         MMIO(ACT_CSR_LOOP) = 0;
+#if CHANNEL_MAJOR
         MMIO(ACT_CSR_BASE) = SRC_ADDR + g * 8 * PLANE;
         MMIO(ACT_CSR_LENGTH) = 8 * PLANE;
+#else
+        MMIO(ACT_CSR_BASE) = SRC_ADDR; /* dense: all C input planes, one group */
+        MMIO(ACT_CSR_LENGTH) = C * PLANE;
+#endif
         MMIO(ACT_CSR_ENABLE) = 1;
         while (!MMIO(ACT_CSR_DRAINED)) {
         }

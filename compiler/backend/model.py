@@ -722,6 +722,10 @@ def _compile_quantized_mobilenet(
                 dw_defines["LINEGEN"] = 1
             if dw_defines is None and not transform_addr:
                 dw_defines = dwpack_defines(layer, tile, dense_nchw=True)
+                if (dw_defines is not None and "linegen_v2" in cfu_features(csr_json)
+                        and dw_defines["C"] <= 8 and dw_defines["OW"] % 8 == 0
+                        and dw_defines["C"] * dw_defines["PLANE"] <= 8192):
+                    dw_defines["LINEGEN"] = 1
             if premapped is not None:
                 # F3: the producer stored this input already LUT-mapped.
                 pack_src_addr = premapped.addr
@@ -915,10 +919,15 @@ def _compile_quantized_mobilenet(
             elif ("act_write" in features and result_lut and nxt.n % tile == 0
                     and dwgather_defines(nxt, tile) is not None and _f1_fusable(nxt, nnxt)
                     and csr_map.wgt_dma.drained is not None):
-                # The consumer will run fused in gather mode (its output F1-fuses).
+                # The consumer will run fused in gather mode (its output F1-fuses),
+                # or on the CFU LineGen (v2 handles 2-wide outputs).
                 chw_stride = padded_m
                 chw_strides[index + 1] = chw_stride
                 gather_inputs.add(index + 1)
+                ow = dwgather_defines(nxt, tile)["OW"]
+                if ("linegen_v2" in features and 8 * chw_stride <= 8192
+                        and (ow in (2, 4) or ow % 8 == 0)):
+                    linegen_inputs.add(index + 1)
             mapped = planner.add(_buffer_name(index + 1, "input_lut_mapped"),
                                  (chw_stride or padded_m) * layer.n, "activation")
             mapped_inputs[index + 1] = mapped

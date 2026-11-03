@@ -6,10 +6,11 @@ buffer. For each M tile of 8 output pixels on one output row, GEN produces
 the 72 activation lines the systolic array consumes, channel-major
 (line = c * 9 + ky * 3 + kx), byte r = input pixel
 (iy0 + ky, ix0 + kx + r * stride) of channel c, or the zero point when that
-is padding. Stride 1 makes one line per cycle; stride 2 takes two cycles
-(two contiguous 8-byte reads, even bytes kept). Two-row mode serves 4-wide
-outputs (a tile is two output rows of 4 pixels): bytes 0..3 come from input
-row iy0 + ky, bytes 4..7 from the row `stride` further down, also two reads.
+is padding. Each line takes R = 1, 2 or 4 reads (cycles): one 8-byte read at
+stride 1; two contiguous reads, even bytes kept, at stride 2; and for 4- or
+2-wide outputs (a tile spans 2 or 4 output rows) one read per output row, W =
+8 / R bytes each. Dense mode writes tap-major lines (tap * nch + c) for an
+ordinary 3x3 conv over nch <= 8 input planes.
 
 The plane buffer is split into even / odd 64-bit word banks so the two
 consecutive words holding any 8 contiguous bytes are read in one cycle;
@@ -36,7 +37,12 @@ class LineGen(Component):
             "ih": In(10),
             "plane": In(14),
             "stride2": In(1),
-            "tworow": In(1),
+            # Reads per line (1 << reads_log2); rowwise: reads step input rows.
+            "reads_log2": In(2),
+            "rowwise": In(1),
+            # Dense conv: tap-major lines (tap * nch + c), nch channels (0 = 8).
+            "dense": In(1),
+            "nch": In(4),
             "zp": In(8),
             # GEN command: tile origin (input row iy0, its byte offset row0
             # within a plane = iy0 * iw, input column ix0 of output byte 0, kx 0).
@@ -70,25 +76,35 @@ class LineGen(Component):
         rd_even = even.read_port(domain="sync")
         rd_odd = odd.read_port(domain="sync")
 
-        # ---- Stage 0: walk (c, ky, kx[, half]) and issue the bank reads ----
+        # Reads per line R = 1 << reads_log2, each giving W = 8 / R bytes:
+        #   rowwise = 0 (OW >= 8): read q is 8 bytes further along the row;
+        #   rowwise = 1 (OW = 4 / 2): read q is `stride` input rows lower.
+        # Chunk byte j of a read = funnel byte j * stride.
+        nch = Signal(4)
+        m.d.comb += nch.eq(Mux(self.nch == 0, 8, self.nch))
+        last_q = Signal(2)
+        m.d.comb += last_q.eq((1 << self.reads_log2) - 1)
+
+        # ---- Stage 0: walk (c, ky, kx, q) and issue the bank reads ----
         cl = Signal(range(8))
         ky = Signal(range(3))
         kx = Signal(range(3))
-        half = Signal()
+        q = Signal(2)
         line = Signal(range(72))
+        cl_line = Signal(range(72))  # dense: line of (cl, tap 0) = cl
         plane_base = Signal(signed(17))
         rowoff = Signal(signed(17))
+        q_off = Signal(signed(14))   # byte offset of read q
+        q_row = Signal(range(8))     # input-row offset of read q
         active = Signal()
 
-        two_reads = Signal()
-        m.d.comb += two_reads.eq(self.stride2 | self.tworow)
-        # Second read: next 8 bytes (stride 2) or `stride` rows down (two-row).
-        row_step = Signal(signed(12))
-        m.d.comb += row_step.eq(Mux(self.stride2, self.iw << 1, self.iw))
-        half_off = Signal(signed(13))
-        m.d.comb += half_off.eq(Mux(half, Mux(self.tworow, row_step, 8), 0))
+        s_val = Signal(range(3))
+        m.d.comb += s_val.eq(Mux(self.stride2, 2, 1))
+        q_step = Signal(signed(13))
+        m.d.comb += q_step.eq(Mux(self.rowwise, Mux(self.stride2, self.iw << 1, self.iw), 8))
+
         byte_addr = Signal(signed(18))
-        m.d.comb += byte_addr.eq(plane_base + rowoff + self.ix0 + kx + half_off)
+        m.d.comb += byte_addr.eq(plane_base + rowoff + self.ix0 + kx + q_off)
         word = Signal(signed(16))
         m.d.comb += word.eq(byte_addr >> 3)
         w_hi = Signal(idx_bits)
@@ -99,56 +115,57 @@ class LineGen(Component):
             m.d.comb += [rd_even.addr.eq(w_hi), rd_odd.addr.eq(w_hi)]
 
         iy = Signal(signed(12))
-        m.d.comb += iy.eq(self.iy0 + ky
-                          + Mux(half & self.tworow, Mux(self.stride2, 2, 1), 0))
+        m.d.comb += iy.eq(self.iy0 + ky + q_row)
         iy_ok = Signal()
         m.d.comb += iy_ok.eq((iy >= 0) & (iy < self.ih))
 
         # Registered for stage 1 (aligned with the sync read data).
         s1_valid = Signal()
-        s1_last_half = Signal()
-        s1_half = Signal()
+        s1_last = Signal()
         s1_odd_first = Signal()
         s1_shift = Signal(3)
         s1_iy_ok = Signal()
-        s1_ix = Signal(signed(13))
+        s1_ix = Signal(signed(14))
         s1_line = Signal(range(72))
         m.d.sync += [
             s1_valid.eq(active),
-            s1_last_half.eq(~two_reads | half),
-            s1_half.eq(half),
+            s1_last.eq(q == last_q),
             s1_odd_first.eq(word[0]),
             s1_shift.eq(byte_addr[0:3]),
             s1_iy_ok.eq(iy_ok),
-            s1_ix.eq(self.ix0 + kx),
+            s1_ix.eq(self.ix0 + kx + Mux(self.rowwise, 0, q_off)),
             s1_line.eq(line),
         ]
 
         with m.If(self.start & ~active):
             m.d.sync += [
-                active.eq(1), cl.eq(0), ky.eq(0), kx.eq(0), half.eq(0), line.eq(0),
-                plane_base.eq(0), rowoff.eq(self.row0),
+                active.eq(1), cl.eq(0), ky.eq(0), kx.eq(0), q.eq(0), line.eq(0),
+                cl_line.eq(0), plane_base.eq(0), rowoff.eq(self.row0), q_off.eq(0), q_row.eq(0),
             ]
         with m.Elif(active):
-            with m.If(two_reads & ~half):
-                m.d.sync += half.eq(1)
+            with m.If(q != last_q):
+                m.d.sync += [q.eq(q + 1), q_off.eq(q_off + q_step),
+                             q_row.eq(q_row + Mux(self.rowwise, s_val, 0))]
             with m.Else():
-                m.d.sync += [half.eq(0), line.eq(line + 1)]
+                m.d.sync += [q.eq(0), q_off.eq(0), q_row.eq(0),
+                             line.eq(line + Mux(self.dense, nch, 1))]
                 with m.If(kx == 2):
                     m.d.sync += kx.eq(0)
                     with m.If(ky == 2):
                         m.d.sync += [ky.eq(0), rowoff.eq(self.row0),
                                      plane_base.eq(plane_base + self.plane)]
-                        with m.If(cl == 7):
+                        with m.If(cl == nch - 1):
                             m.d.sync += active.eq(0)
                         with m.Else():
                             m.d.sync += cl.eq(cl + 1)
+                            with m.If(self.dense):
+                                m.d.sync += [line.eq(cl_line + 1), cl_line.eq(cl_line + 1)]
                     with m.Else():
                         m.d.sync += [ky.eq(ky + 1), rowoff.eq(rowoff + self.iw)]
                 with m.Else():
                     m.d.sync += kx.eq(kx + 1)
 
-        # ---- Stage 1: funnel, select, pad, write ----
+        # ---- Stage 1: funnel, chunk, pad, assemble, write ----
         lo = Signal(64)
         hi = Signal(64)
         m.d.comb += [
@@ -157,37 +174,41 @@ class LineGen(Component):
         ]
         both = Signal(128)
         m.d.comb += both.eq(Cat(lo, hi))
-        src = Array(both.word_select(s, 8) for s in range(16))
+        src = Array(both.word_select(i, 8) for i in range(16))
         got = [Signal(8, name=f"got{i}") for i in range(8)]
         for i in range(8):
             m.d.comb += got[i].eq(src[s1_shift + i])
 
-        out = [Signal(8, name=f"out{r}") for r in range(8)]
-        held = Signal(32)  # two-read modes: output bytes 0..3 from the first read
-        for r in range(8):
-            # Input column of output byte r (two-row: both halves use r % 4).
-            rr = r % 4
-            ix_r = Signal(signed(14), name=f"ix{r}")
-            m.d.comb += ix_r.eq(s1_ix + Mux(self.tworow, Mux(self.stride2, 2 * rr, rr),
-                                            Mux(self.stride2, 2 * r, r)))
-            ok = Signal(name=f"ok{r}")
-            m.d.comb += ok.eq(s1_iy_ok & (ix_r >= 0) & (ix_r < self.iw))
-            if r < 4:
-                # Stride 1: byte r. Stride 2 / two-row s2: byte 2r. Two-row s1: byte r.
-                raw = Mux(self.stride2, got[2 * r], got[r])
-            else:
-                # Single read (s1): byte r. Second read: byte (r-4)*stride.
-                raw = Mux(self.tworow, Mux(self.stride2, got[2 * (r - 4)], got[r - 4]),
-                          Mux(self.stride2, got[2 * (r - 4)], got[r]))
-            m.d.comb += out[r].eq(Mux(ok, raw, self.zp))
-        with m.If(s1_valid & two_reads & ~s1_half):
-            m.d.sync += held.eq(Cat(*out[0:4]))
+        chunk = [Signal(8, name=f"chunk{j}") for j in range(8)]
+        for j in range(8):
+            ix_j = Signal(signed(15), name=f"ix{j}")
+            m.d.comb += ix_j.eq(s1_ix + Mux(self.stride2, 2 * j, j))
+            ok = Signal(name=f"ok{j}")
+            m.d.comb += ok.eq(s1_iy_ok & (ix_j >= 0) & (ix_j < self.iw))
+            raw = Mux(self.stride2, got[2 * j], got[j]) if j < 4 else got[j]
+            m.d.comb += chunk[j].eq(Mux(ok, raw, self.zp))
+        chunk_v = Signal(64)
+        m.d.comb += chunk_v.eq(Cat(*chunk))
+
+        # Shift each read's W bytes in from the top; after R reads the line
+        # holds read 0's bytes at the bottom.
+        acc = Signal(64)
+        merged = Signal(64)
+        with m.Switch(self.reads_log2):
+            with m.Case(0):
+                m.d.comb += merged.eq(chunk_v)
+            with m.Case(1):
+                m.d.comb += merged.eq(Cat(acc[32:64], chunk_v[0:32]))
+            with m.Default():
+                m.d.comb += merged.eq(Cat(acc[16:64], chunk_v[0:16]))
+        with m.If(s1_valid):
+            m.d.sync += acc.eq(merged)
 
         m.d.comb += [
-            self.wr_en.eq(s1_valid & s1_last_half),
+            self.wr_en.eq(s1_valid & s1_last),
             self.wr_addr.eq(s1_line),
-            self.wr_data.eq(Mux(two_reads, Cat(held, *out[4:8]), Cat(*out))),
+            self.wr_data.eq(merged),
+            # busy also covers the stage-1 write still in flight.
+            self.busy.eq(active | self.start | s1_valid),
         ]
-        # busy also covers the stage-1 write still in flight.
-        m.d.comb += self.busy.eq(active | self.start | s1_valid)
         return m

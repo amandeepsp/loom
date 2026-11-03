@@ -70,6 +70,14 @@ static inline __attribute__((always_inline)) void put_line(int line, u32 lo, u32
     CFU_W(6, 0, lo, hi);
 }
 
+static inline __attribute__((always_inline)) void kick_weights(int g) {
+    MMIO(WGT_CSR_ENABLE) = 0;
+    MMIO(WGT_CSR_LOOP) = 0;
+    MMIO(WGT_CSR_BASE) = WGT_ADDR + g * (KG * 8);
+    MMIO(WGT_CSR_LENGTH) = KG * 8;
+    MMIO(WGT_CSR_ENABLE) = 1;
+}
+
 void loom_dwgemm(void) {
     const u8 *src = (const u8 *)SRC_ADDR;
     const i32 *bias = (const i32 *)BIAS_ADDR;
@@ -97,12 +105,10 @@ void loom_dwgemm(void) {
                 CFU_W(2, 2, r * 8 + col, sh);
             }
         }
-        /* This group's weights, once; they stay in the bank for every tile. */
-        MMIO(WGT_CSR_ENABLE) = 0;
-        MMIO(WGT_CSR_LOOP) = 0;
-        MMIO(WGT_CSR_BASE) = WGT_ADDR + g * (KG * 8);
-        MMIO(WGT_CSR_LENGTH) = KG * 8;
-        MMIO(WGT_CSR_ENABLE) = 1;
+        /* This group's weights (kicked before the loop for g = 0, else
+         * prefetched during group g - 1); they stay in the bank for every
+         * tile of the group. */
+        if (g == 0) kick_weights(0);
         while (!MMIO(WGT_CSR_DRAINED)) {
         }
 
@@ -117,6 +123,9 @@ void loom_dwgemm(void) {
                 /* Tile t - 1: first | last, keep the weight bank after the
                  * group's first tile. */
                 CFU_W(0, 0, 3 | (t > 1 ? 4 : 0), KG);
+                /* The group's first compute swapped the weight banks; the fill
+                 * bank stays idle for the rest of the group: prefetch g + 1. */
+                if (t == 1 && g + 1 < N / 8) kick_weights(g + 1);
                 /* The start pulse is registered a cycle late: give it time to
                  * reach PRIME (bank swap) before the next WRITE_ACT, and keep
                  * COMPUTE_WAIT off the previous tile's latched done. */

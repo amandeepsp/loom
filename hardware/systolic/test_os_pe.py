@@ -5,21 +5,16 @@ from hardware.systolic.os_pe import OutputStationaryPE
 
 class TestOutputStationaryPE:
     def test_accumulate(self):
-        """prod <- act*w, then acc += prod: each product lands one cycle later."""
+        """acc += act_in * w_in each cycle."""
 
         async def testbench(ctx):
             ctx.set(dut.act_in, 3)
             ctx.set(dut.w_in, 4)
             await ctx.tick()
-            assert ctx.get(dut.psum_out) == 0  # product registered, not yet added
+            assert ctx.get(dut.psum_out) == 12  # 3*4
 
             ctx.set(dut.act_in, 2)
             ctx.set(dut.w_in, 5)
-            await ctx.tick()
-            assert ctx.get(dut.psum_out) == 12  # 3*4
-
-            ctx.set(dut.act_in, 0)
-            ctx.set(dut.w_in, 0)
             await ctx.tick()
             assert ctx.get(dut.psum_out) == 22  # 12 + 2*5
 
@@ -54,28 +49,23 @@ class TestOutputStationaryPE:
             sim.run()
 
     def test_psum_load(self):
-        """psum_load resets the accumulator to 0 (idle inputs keep prod at 0)."""
+        """psum_load resets the accumulator to 0."""
 
         async def testbench(ctx):
             ctx.set(dut.act_in, 3)
             ctx.set(dut.w_in, 4)
             await ctx.tick()
-            ctx.set(dut.act_in, 0)
-            ctx.set(dut.w_in, 0)
-            await ctx.tick()
             assert ctx.get(dut.psum_out) == 12
 
-            await ctx.tick()  # prod drains to 0
             ctx.set(dut.psum_load, 1)
+            ctx.set(dut.act_in, 0)
+            ctx.set(dut.w_in, 0)
             await ctx.tick()
             ctx.set(dut.psum_load, 0)
             assert ctx.get(dut.psum_out) == 0
 
             ctx.set(dut.act_in, 5)
             ctx.set(dut.w_in, 2)
-            await ctx.tick()
-            ctx.set(dut.act_in, 0)
-            ctx.set(dut.w_in, 0)
             await ctx.tick()
             assert ctx.get(dut.psum_out) == 10  # fresh: 5*2
 

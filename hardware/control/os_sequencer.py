@@ -94,8 +94,7 @@ class OSSequencer(wiring.Component):
 
         cycle = Signal(range(self.scratchpad_depth + self.rows + self.cols))
         num_results = self.rows * self.cols
-        # Skew drain (rows + cols - 2) plus one cycle for the registered PE product.
-        flush_cycles = self.rows + self.cols - 1
+        flush_cycles = self.rows + self.cols - 2
 
         # Mux PE psum outputs into a flat array for indexed access
         psum_array = Array(

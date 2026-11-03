@@ -33,7 +33,7 @@ async def run_tile(ctx, dut, k, *, first=True, last=True, rows=2, cols=2):
         await ctx.tick()
 
     # FLUSH
-    for _ in range(rows + cols - 1):  # skew drain + registered PE product
+    for _ in range(rows + cols - 2):
         await ctx.tick()
 
     if last:
@@ -160,7 +160,7 @@ class TestSequencer:
             await ctx.tick()
 
             # FLUSH
-            for _ in range(ROWS + COLS - 1):  # skew drain + registered PE product
+            for _ in range(ROWS + COLS - 2):
                 await ctx.tick()
 
             # Set known psum values

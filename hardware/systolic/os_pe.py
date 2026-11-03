@@ -12,12 +12,7 @@ class OutputStationaryPE(wiring.Component):
 
     Modes (priority order):
       psum_load=1: acc ← 0         (reset for new tile)
-      else:        acc += prod      (compute)
-
-    The product is registered (prod ← act * w) before accumulating, so the
-    DSP multiply and the 32-bit add are separate pipeline stages. This adds
-    one cycle of latency (the sequencer flushes one extra cycle); prod is 0
-    whenever the array inputs are idle, so nothing leaks across tiles.
+      else:        acc += act * w   (compute)
 
     psum_out = acc (combinational read, directly exposed for R×C readback).
     """
@@ -40,17 +35,15 @@ class OutputStationaryPE(wiring.Component):
     def elaborate(self, _platform):
         m = Module()
         acc = Signal(signed(self.acc_width))
-        prod = Signal(signed(2 * self.in_width))
 
         # Registered passthrough for systolic flow
         m.d.sync += self.act_out.eq(self.act_in)
         m.d.sync += self.w_out.eq(self.w_in)
 
-        m.d.sync += prod.eq(self.act_in * self.w_in)
         with m.If(self.psum_load):
             m.d.sync += acc.eq(0)
         with m.Else():
-            m.d.sync += acc.eq(acc + prod)
+            m.d.sync += acc.eq(acc + self.act_in * self.w_in)
 
         m.d.comb += self.psum_out.eq(acc)
 

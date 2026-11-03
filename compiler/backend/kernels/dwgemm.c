@@ -50,6 +50,17 @@ extern int32_t host_params[];
 #endif
 
 
+/* Gather mode: input byte for output pixel m, tap; ZP for padding or m >= M.
+ * Fully unrolled per tile, so single-tile layers fold every bound check and
+ * offset to a constant. */
+static inline __attribute__((always_inline)) u8 gather_byte(const u8 *plane, int m, int tap) {
+    int oy = m / OW, ox = m % OW, ky = tap / 3, kx = tap % 3;
+    int iy = oy * STRIDE + ky - PAD_T, ix = ox * STRIDE + kx - PAD_L;
+    if (m >= OH * OW || (unsigned)iy >= (unsigned)IH || (unsigned)ix >= (unsigned)IW)
+        return (u8)(ZP);
+    return plane[iy * IW + ix];
+}
+
 static inline __attribute__((always_inline)) void put_line(int line, u32 lo, u32 hi) {
 #if !CHANNEL_MAJOR
     CFU_W(6, 1, line, 0); /* tap-major lines are not written in order */
@@ -95,8 +106,27 @@ void loom_dwgemm(void) {
         while (!MMIO(WGT_CSR_DRAINED)) {
         }
 
-        for (int t = 0; t < (OH * OW) / 8; ++t) {
+#ifndef GATHER
+#define GATHER 0
+#endif
+        for (int t = 0; t < (OH * OW + 7) / 8; ++t) {
             int m0 = t * 8;
+#if GATHER
+            CFU_W(6, 1, 0, 0);
+            for (int cl = 0; cl < 8; ++cl) {
+                const u8 *plane = src + (g * 8 + cl) * PLANE;
+#pragma clang loop unroll(full)
+                for (int tap = 0; tap < 9; ++tap) {
+                    u32 lo = 0, hi = 0;
+#pragma clang loop unroll(full)
+                    for (int r = 0; r < 4; ++r) {
+                        lo |= (u32)gather_byte(plane, m0 + r, tap) << (8 * r);
+                        hi |= (u32)gather_byte(plane, m0 + 4 + r, tap) << (8 * r);
+                    }
+                    CFU_W(6, 0, lo, hi);
+                }
+            }
+#else
             int oy0 = m0 / OW, ox0 = m0 % OW;            /* rows 0..3 */
             int oy1 = (m0 + 4) / OW, ox1 = (m0 + 4) % OW; /* rows 4..7 */
             CFU_W(6, 1, 0, 0);
@@ -122,6 +152,7 @@ void loom_dwgemm(void) {
 #undef LINE
                 }
             }
+#endif /* GATHER */
             /* first | last, plus keep the weight bank after the first tile. */
             CFU_W(0, 0, 3 | (t ? 4 : 0), KG);
             /* COMPUTE_WAIT right after START can see the previous tile's

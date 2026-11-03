@@ -31,7 +31,7 @@ class TestOutputStationaryPEArray:
             ctx.set(dut.w_in_1, 8)
             await ctx.tick()
 
-            # Flush: R + C - 2 = 2 cycles
+            # Flush: R + C - 2 = 2 cycles (+1 for the registered product, below)
             ctx.set(dut.act_in_0, 0)
             ctx.set(dut.act_in_1, 0)
             ctx.set(dut.w_in_0, 0)
@@ -40,6 +40,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
 
             # All results available directly
+            await ctx.tick()  # registered PE product lands one cycle later
             assert ctx.get(dut.psum_out_0_0) == 19  # C[0][0]
             assert ctx.get(dut.psum_out_0_1) == 22  # C[0][1]
             assert ctx.get(dut.psum_out_1_0) == 43  # C[1][0]
@@ -83,6 +84,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
             await ctx.tick()
 
+            await ctx.tick()  # registered PE product lands one cycle later
             assert ctx.get(dut.psum_out_0_0) == -17  # C[0][0]
             assert ctx.get(dut.psum_out_0_1) == 20   # C[0][1]
             assert ctx.get(dut.psum_out_1_0) == 27   # C[1][0]
@@ -137,7 +139,7 @@ class TestOutputStationaryPEArray:
                 ctx.set(getattr(dut, f"act_in_{r}"), 0)
             for c in range(4):
                 ctx.set(getattr(dut, f"w_in_{c}"), 0)
-            for _ in range(6):
+            for _ in range(7):  # R + C - 2 skew drain + 1 registered product
                 await ctx.tick()
 
             # All R×C results available directly
@@ -181,6 +183,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
 
             # First tile results
+            await ctx.tick()  # registered PE product lands one cycle later
             assert ctx.get(dut.psum_out_0_0) == 1   # C[0][0]
             assert ctx.get(dut.psum_out_0_1) == 2   # C[0][1]
             assert ctx.get(dut.psum_out_1_0) == 3   # C[1][0]
@@ -208,6 +211,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
             await ctx.tick()
 
+            await ctx.tick()  # registered PE product lands one cycle later
             assert ctx.get(dut.psum_out_0_0) == 2    # C[0][0]
             assert ctx.get(dut.psum_out_0_1) == 6    # C[0][1]
             assert ctx.get(dut.psum_out_1_0) == 6    # C[1][0]
@@ -267,6 +271,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
             await ctx.tick()
 
+            await ctx.tick()  # registered PE product lands one cycle later
             # Read K-tile 0 results directly
             for r in range(2):
                 for c in range(2):
@@ -291,6 +296,7 @@ class TestOutputStationaryPEArray:
             await ctx.tick()
             await ctx.tick()
 
+            await ctx.tick()  # registered PE product lands one cycle later
             # Read K-tile 1 results directly
             for r in range(2):
                 for c in range(2):

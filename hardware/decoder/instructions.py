@@ -1,4 +1,4 @@
-from amaranth import signed
+from amaranth import Cat, Signal, signed
 from amaranth.lib.wiring import In, Out
 from hardware.cfu import Instruction
 
@@ -78,9 +78,22 @@ class ConfigInstruction(Instruction):
     output_offset: Out(signed(16))
     activation_min: Out(signed(8))
     activation_max: Out(signed(8))
+    # funct7=3: result-LUT word in1 at index in0 (0..63); funct7=4: LUT enable = in1[0]
+    lut_wr_addr: Out(6)
+    lut_wr_data: Out(32)
+    lut_wr_en: Out(1)
+    lut_en: Out(1)
 
     def elaborate(self, platform):
         m = super().elaborate(platform)
+
+        m.d.comb += [
+            self.lut_wr_addr.eq(self.in0[:6]),
+            self.lut_wr_data.eq(self.in1),
+            self.lut_wr_en.eq(self.start & (self.funct7 == 3)),
+        ]
+        with m.If(self.start & (self.funct7 == 4)):
+            m.d.sync += self.lut_en.eq(self.in1[0])
 
         with m.If(self.start):
             with m.Switch(self.funct7):
@@ -101,11 +114,14 @@ class ReadResultInstruction(Instruction):
     funct7=0: one INT8 result (sign-extended) at index in0.
     funct7=1: four INT8 results at indices in0..in0+3 (in0 a multiple of 4),
               packed little-endian into one 32-bit word.
+    funct7=2: four INT8 results down a column: rows r0..r0+3 of column c,
+              in0 = r0 * cols + c (r0 a multiple of 4), packed little-endian.
     """
 
     out_addr: Out(32)
     out_data: In(signed(8))
     out_data4: In(32)
+    out_data4col: In(32)
 
     def elaborate(self, platform):
         m = super().elaborate(platform)
@@ -113,8 +129,45 @@ class ReadResultInstruction(Instruction):
         m.d.comb += self.out_addr.eq(self.in0)
         with m.If(self.funct7 == 1):
             m.d.comb += self.output.eq(self.out_data4)
+        with m.Elif(self.funct7 == 2):
+            m.d.comb += self.output.eq(self.out_data4col)
         with m.Else():
             m.d.comb += self.output.eq(self.out_data)
+
+        self.signal_done(m)
+        return m
+
+
+class WriteActInstruction(Instruction):
+    """funct3=6: CPU write into the activation scratchpad fill bank.
+
+    funct7=0: write line {in1, in0} (in0 = rows 0..3, the lower DMA bytes)
+              at the write pointer, then increment the pointer.
+    funct7=1: set the write pointer to in0.
+
+    Lets the CPU stream im2col words straight into the CFU instead of through
+    a packed DRAM buffer and the activation DMA. Software never mixes it with
+    an activation DMA in flight.
+    """
+
+    wr_addr: Out(16)
+    wr_data: Out(64)
+    wr_en: Out(1)
+
+    def elaborate(self, platform):
+        m = super().elaborate(platform)
+
+        ptr = Signal(16)
+        m.d.comb += [
+            self.wr_addr.eq(ptr),
+            self.wr_data.eq(Cat(self.in0, self.in1)),
+            self.wr_en.eq(self.start & (self.funct7 == 0)),
+        ]
+        with m.If(self.start):
+            with m.If(self.funct7 == 1):
+                m.d.sync += ptr.eq(self.in0)
+            with m.Else():
+                m.d.sync += ptr.eq(ptr + 1)
 
         self.signal_done(m)
         return m

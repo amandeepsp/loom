@@ -389,6 +389,36 @@ def block_diagonal_2d_taps(layer) -> int | None:
     return layer.k // layer.n
 
 
+def dwpack_defines(layer, tile: int = 8, *, dense_nchw: bool = False) -> dict[str, int] | None:
+    """Shape constants for dwpack.c if it can pack `layer`'s 3x3 conv input.
+
+    dwpack reads a channel-major (CHW) source of IH * IW bytes per channel.
+    Default: a depthwise layer whose producer stores CHW
+    (GemmTargetSpec.output_channel_stride); channel-major K. `dense_nchw`: a
+    dense conv reading an NCHW buffer (the model input); tap-major K.
+    """
+    pk = getattr(layer, "packing", None)
+    if pk is None or pk.nchw != dense_nchw:
+        return None
+    if dense_nchw:
+        if block_diagonal_taps(layer, tile) is not None or layer.k != 9 * pk.channels:
+            return None
+    elif block_diagonal_taps(layer, tile) != 9:
+        return None
+    if (pk.kernel_h, pk.kernel_w) != (3, 3) or pk.stride_h != pk.stride_w:
+        return None
+    s, oh, ow, ih, iw = pk.stride_h, pk.output_h, pk.output_w, pk.input_h, pk.input_w
+    if s not in (1, 2) or pk.pad_left not in (0, 1) or pk.pad_top not in (0, 1):
+        return None
+    if ow % 4 or iw % 4 or (oh * ow) % tile or (ih * iw) % tile:
+        return None
+    if s == 2 and iw < 2 * ow:
+        return None
+    return {"C": pk.channels, "IH": ih, "IW": iw, "OH": oh, "OW": ow, "STRIDE": s,
+            "PAD_T": pk.pad_top, "PAD_L": pk.pad_left, "ZP": layer.input_zero_point,
+            "PLANE": ih * iw, "K": layer.k, "CHANNEL_MAJOR": int(not dense_nchw)}
+
+
 def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
     """[taps * tile, C] stacked diagonal blocks in channel-major K order."""
     channels = layer.n
@@ -398,6 +428,16 @@ def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
         local = (c % tile) * taps
         out[local : local + taps, c] = weight[[t * channels + c for t in range(taps)], c]
     return out
+
+
+def _cfu_lut(planner, index: int, lut: np.ndarray, enabled: bool) -> int:
+    """256-byte result LUT for the CFU, indexed by the result's unsigned byte."""
+    if not enabled:
+        return 0
+    table = lut[(np.arange(256).astype(np.uint8).view(np.int8).astype(np.int16)) + 128]
+    buf = planner.add(_buffer_name(index, "cfu_lut"), 256, "constant.requant_lut",
+                      table.astype(np.int8).tobytes())
+    return buf.addr
 
 
 def compile_gemm(
@@ -580,6 +620,8 @@ def _compile_quantized_mobilenet(
         taps = block_diagonal_taps(layer, tile)
         premapped = mapped_inputs.pop(index, None)
         cpu_taps = block_diagonal_2d_taps(layer)
+        dw_defines = None
+        pack_src_addr = source.addr
         if layer.packing is None:
             pack_op = Pack2DToTilesOp(
                 pack_name,
@@ -598,6 +640,9 @@ def _compile_quantized_mobilenet(
             pack_src_addr = source.addr
             pack_transform_addr = transform_addr
             lut_bytes = packing.input_h * packing.input_w * packing.channels
+            dw_defines = dwpack_defines(layer, tile) if premapped is not None else None
+            if dw_defines is None and not transform_addr:
+                dw_defines = dwpack_defines(layer, tile, dense_nchw=True)
             if premapped is not None:
                 # F3: the producer stored this input already LUT-mapped.
                 pack_src_addr = premapped.addr
@@ -637,10 +682,15 @@ def _compile_quantized_mobilenet(
                 tile=tile,
                 nchw=packing.nchw,
             )
-            pack_code = emit_pack_conv2d_to_tiles_op(pack_op)
-        if cpu_taps is None and prepacked is None:
-            loom_ops.append(pack_op)
-            functions.append(RiscvFunction(pack_name, pack_code))
+            if dw_defines is not None:
+                # ... and stored it channel-major: word-wise depthwise im2col.
+                pack_code = compile_c_kernel(pack_name, "dwpack.c", {
+                    **dw_defines, "SRC_ADDR": pack_src_addr, "DST_ADDR": packed_input.addr})
+            else:
+                pack_code = emit_pack_conv2d_to_tiles_op(pack_op)
+        # Emitted just before the GEMM unless the layer runs fused (dwgemm.c).
+        pending_pack = (pack_op, pack_name, pack_code) if cpu_taps is None and prepacked is None else None
+        pack_pos = len(loom_ops)  # the pack op precedes this layer's GemmOp
 
         gemm_k = layer.k if taps is None else taps * tile
         if cpu_taps is not None:
@@ -727,7 +777,8 @@ def _compile_quantized_mobilenet(
         affine_ops.extend(op.clone() for op in kernel_affine_ops)
         # F1: if the next layer is a pointwise conv fed by a 2-D pack + LUT,
         # store this layer's results straight into its packed layout.
-        fused_addr = fused_lut_addr = 0
+        fused_addr = fused_lut_addr = cfu_lut_addr = 0
+        result_lut = "result_lut" in cfu_features(csr_json)
         nxt = plan.layers[index + 1] if index + 1 < len(plan.layers) else None
         if (nxt is not None and nxt.packing is None and nxt.kind == "conv2d"
                 and nxt.input_transform is not None and nxt.k == layer.n and nxt.m == layer.m
@@ -741,7 +792,9 @@ def _compile_quantized_mobilenet(
             store_lut = planner.add(_buffer_name(index + 1, "store_lut"), len(rebased),
                                     "constant.requant_lut", rebased.astype(np.int8).tobytes())
             fused_addr, fused_lut_addr = fused.addr, store_lut.addr
+            cfu_lut_addr = _cfu_lut(planner, index + 1, lut, result_lut)
         output_addr = output.addr
+        chw_stride = 0
         if (not fused_addr and nxt is not None and nxt.packing is not None
                 and not nxt.packing.nchw and nxt.input_transform is not None
                 and nxt.packing.kernel_h * nxt.packing.kernel_w > 1
@@ -758,7 +811,13 @@ def _compile_quantized_mobilenet(
             store_lut = planner.add(_buffer_name(index + 1, "store_lut"), len(rebased),
                                     "constant.requant_lut", rebased.astype(np.int8).tobytes())
             output_addr, fused_lut_addr = mapped.addr, store_lut.addr
+            cfu_lut_addr = _cfu_lut(planner, index + 1, lut, result_lut)
+            if dwpack_defines(nxt, tile) is not None and padded_m == layer.m:
+                chw_stride = padded_m  # consumer's dwpack reads CHW
         target_spec = GemmTargetSpec(
+            output_channel_stride=chw_stride,
+            result_lut=result_lut,
+            cfu_lut_addr=cfu_lut_addr,
             packed_output_addr=fused_addr,
             store_lut_addr=fused_lut_addr,
             m=padded_m,
@@ -782,13 +841,42 @@ def _compile_quantized_mobilenet(
             input_k_stride=layer.k if taps is not None else 0,
             input_n_k_offset=taps or 0,
         )
-        kernel_riscv_module = lower_affine_kernel_to_riscv_scf(
-            RiscvLoweringContext(spec=target_spec, csr=csr_map),
-            kernel_affine_ops,
+        features = cfu_features(csr_json)
+        fused_kernel = (
+            "act_write" in features and result_lut and dw_defines is not None
+            and cfu_lut_addr and (fused_addr or chw_stride) and layer.n % tile == 0
+            and padded_m == layer.m and csr_map.wgt_dma.drained is not None
         )
-        riscv_ir_ops.extend(op.clone() for op in kernel_riscv_module.body.block.ops)
-        riscv_code = encode_riscv_module(kernel_riscv_module)
-        asm = _emit_custom0_asm(layer, padded_m)
+        kind = layer.kind
+        if fused_kernel:
+            # 3x3 conv whose im2col lines the CPU streams straight into the CFU.
+            out_addr, m_stride, c_stride = ((fused_addr, layer.n, tile) if fused_addr
+                                            else (output_addr, 1, chw_stride))
+            wgt = csr_map.wgt_dma
+            riscv_code = compile_c_kernel(layer.name, "dwgemm.c", {
+                **dw_defines, "SRC_ADDR": pack_src_addr, "N": layer.n, "KG": gemm_k,
+                "WGT_ADDR": weight_buffer.addr, "BIAS_ADDR": bias_buffer.addr,
+                "MULT_ADDR": multiplier_buffer.addr, "SHIFT_ADDR": shift_buffer.addr,
+                "OUT_ZP": layer.output_zero_point, "ACT_MIN": layer.activation_min,
+                "ACT_MAX": layer.activation_max, "CFU_LUT_ADDR": cfu_lut_addr,
+                "OUT_ADDR": out_addr, "MSTRIDE": m_stride, "CSTRIDE": c_stride,
+                "WGT_CSR_BASE": wgt.base, "WGT_CSR_LENGTH": wgt.length,
+                "WGT_CSR_ENABLE": wgt.enable, "WGT_CSR_LOOP": wgt.loop,
+                "WGT_CSR_DRAINED": wgt.drained,
+            })
+            asm = ""
+            kind = layer.kind + "_fused"
+        else:
+            if pending_pack is not None:
+                loom_ops.insert(pack_pos, pending_pack[0])
+                functions.append(RiscvFunction(pending_pack[1], pending_pack[2]))
+            kernel_riscv_module = lower_affine_kernel_to_riscv_scf(
+                RiscvLoweringContext(spec=target_spec, csr=csr_map),
+                kernel_affine_ops,
+            )
+            riscv_ir_ops.extend(op.clone() for op in kernel_riscv_module.body.block.ops)
+            riscv_code = encode_riscv_module(kernel_riscv_module)
+            asm = _emit_custom0_asm(layer, padded_m)
         functions.append(RiscvFunction(layer.name, riscv_code, asm))
         kernels.append(
             GemmKernel(
@@ -804,7 +892,7 @@ def _compile_quantized_mobilenet(
                 riscv_code=riscv_code,
                 riscv_asm=asm,
                 requires_repack_from=source.name if index else None,
-                kind=layer.kind,
+                kind=kind,
                 packed_by=plan.layers[index - 1].name if prepacked is not None else None,
                 input_mapped_by=plan.layers[index - 1].name if premapped is not None else None,
             )
@@ -986,6 +1074,8 @@ def _compile_tosa_module(
             activation_max=gemm.activation_max,
             cfu_word_bits=cfu_word_bits,
             cfu_store_depth_words=cfu_store_depth_words,
+            # Clears the sticky CFU result-LUT enable on result_lut bitstreams.
+            result_lut="result_lut" in cfu_features(csr_json),
         )
         riscv_code = b""
         if emit_code and csr_map is not None:
@@ -1260,9 +1350,9 @@ def _functions_from_rewritten_loom(
 def _validate_executable_model(compiled: CompiledModel) -> None:
     expected_functions = []
     for index, kernel in enumerate(compiled.kernels):
-        # CPU kernels read their input directly; fused kernels get it packed
-        # by their producer's result store.
-        if not kernel.kind.endswith("_cpu") and kernel.packed_by is None:
+        # CPU kernels and act_write-fused GEMMs read their input directly;
+        # packed_by kernels get it packed by their producer's result store.
+        if not kernel.kind.endswith(("_cpu", "_fused")) and kernel.packed_by is None:
             expected_functions.append(_buffer_name(index, "pack_input"))
         expected_functions.append(kernel.name)
     names = [fn.name for fn in compiled.functions]

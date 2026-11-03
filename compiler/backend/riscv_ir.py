@@ -73,10 +73,32 @@ def _replace_module_body(module: ModuleOp, new_ops: tuple[Operation, ...]) -> No
 
 
 def _schedule_to_module(ctx: RiscvLoweringContext, schedule: AffineGemmSchedule) -> ModuleOp:
-    out: list[Operation] = []
+    out: list[Operation] = _result_lut_ops(ctx.spec)
     for region in schedule.n_regions:
         out.extend(_n_region_ops(ctx, region))
     return ModuleOp(out)
+
+
+def _result_lut_ops(spec: GemmTargetSpec) -> list[Operation]:
+    """Upload this GEMM's result LUT into the CFU (or disable it).
+
+    The enable is a sticky CFU register, so every GEMM on a `result_lut`
+    bitstream sets it explicitly.
+    """
+    if not spec.result_lut:
+        return []
+    out: list[Operation] = []
+    if spec.cfu_lut_addr:
+        def body(i_iv: SSAValue) -> list[Operation]:
+            off = riscv.SlliOp(i_iv, 2)
+            base = rv32.LiOp(spec.cfu_lut_addr)
+            addr = riscv.AddOp(base.rd, off.rd)
+            word = riscv.LwOp(addr.rd, 0)
+            return [off, base, addr, word, loom_riscv.WriteLutOp(i_iv, word.rd)]
+        out += _for_ops(0, 64, 1, body)
+    enable = rv32.LiOp(1 if spec.cfu_lut_addr else 0)
+    out += [enable, loom_riscv.WriteConfigOp(enable.rd, register=4)]
+    return out
 
 
 def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
@@ -275,7 +297,9 @@ def _store_result_ops(
     offset instead of re-deriving its address from scratch.
     """
     spec = ctx.spec
-    if (spec.tile - 1) * spec.n + n_count <= 2047:
+    if spec.output_channel_stride:
+        return _store_result_tile_chw(ctx, n_count, m_iv, n_iv)
+    if spec.packed_output_addr or (spec.tile - 1) * spec.n + n_count <= 2047:
         return _store_result_tile_unrolled(ctx, n_count, m_iv, n_iv)
     return _for_ops(
         0,
@@ -283,6 +307,83 @@ def _store_result_ops(
         1,
         lambda row_iv: _store_result_row(ctx, n_count, m_iv, n_iv, row_iv),
     )
+
+
+def _store_result_tile_chw(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    m_iv: SSAValue,
+    n_iv: SSAValue,
+) -> list[Operation]:
+    """Whole-tile channel-major store: (r, col) -> out + (n+col)*S + m + r.
+
+    One base register per column (stepped by S), rows as sb immediates.
+    Optional store LUT as in the other variants.
+    """
+    spec = ctx.spec
+    stride = spec.output_channel_stride
+    n_ops, n_off = _mul_const(n_iv, stride)
+    off = riscv.AddOp(m_iv, n_off)
+    base0 = rv32.LiOp(spec.output_addr)
+    col_base = riscv.AddOp(base0.rd, off.rd)
+    out: list[Operation] = [*n_ops, off, base0, col_base]
+    lut = None
+    if spec.cpu_store_lut:
+        lut = rv32.LiOp(spec.store_lut_addr + 128)
+        out.append(lut)
+    step = None
+    if stride > 2047:
+        step = rv32.LiOp(stride)
+        out.append(step)
+    for col in range(n_count):
+        if col:
+            col_base = (riscv.AddiOp(col_base.rd, stride) if step is None
+                        else riscv.AddOp(col_base.rd, step.rd))
+            out.append(col_base)
+        out += _store_column_words(spec, col, col_base, 0, lut)
+    return out
+
+
+def _store_column_words(spec: GemmTargetSpec, col: int, base: Operation, imm: int, lut) -> list[Operation]:
+    """Store one result column (rows 0..tile-1, contiguous bytes) as words.
+
+    The dcache is write-through, so each store is a separate bus write
+    (~13 cycles to SDRAM); assembling 4 bytes per sw beats 4 sb's.
+    base + imm must be word-aligned.
+    """
+    out: list[Operation] = []
+    if spec.result_lut:
+        # CFU column read: 4 (already LUT-mapped) rows per READ_RESULT.
+        for w in range(spec.tile // 4):
+            index = rv32.LiOp(4 * w * spec.tile + col)
+            word = loom_riscv.ReadResult4ColOp(index.rd)
+            out += [index, word, riscv.SwOp(base.rd, word.rd, imm + 4 * w)]
+        return out
+    for w in range(spec.tile // 4):
+        word = None
+        for b in range(4):
+            r = 4 * w + b
+            index = rv32.LiOp(r * spec.tile + col)
+            read = loom_riscv.ReadResultOp(index.rd)
+            out += [index, read]
+            if lut is not None:
+                addr = riscv.AddOp(lut.rd, read.rd)
+                byte = riscv.LbuOp(addr.rd, 0)  # zero-extended
+                out += [addr, byte]
+            elif b < 3:
+                byte = riscv.AndiOp(read.rd, 0xFF)  # READ_RESULT sign-extends
+                out.append(byte)
+            else:
+                byte = read
+            if b:
+                byte = riscv.SlliOp(byte.rd, 8 * b)
+                out.append(byte)
+                word = riscv.OrOp(word.rd, byte.rd)
+                out.append(word)
+            else:
+                word = byte
+        out.append(riscv.SwOp(base.rd, word.rd, imm + 4 * w))
+    return out
 
 
 def _store_result_tile_unrolled(
@@ -312,9 +413,14 @@ def _store_result_tile_unrolled(
     base = riscv.AddOp(base0.rd, off.rd)
     out += [*m_ops, *n_ops, off, base0, base]
     lut = None
-    if spec.store_lut_addr:
+    if spec.cpu_store_lut:
         lut = rv32.LiOp(spec.store_lut_addr + 128)
         out.append(lut)
+    if spec.packed_output_addr and spec.tile % 4 == 0:
+        # Packed (F1): column col is tile contiguous bytes at base + col*tile.
+        for col in range(n_count):
+            out += _store_column_words(spec, col, base, col * spec.tile, lut)
+        return out
     if spec.packed_read and n_count == spec.tile and spec.tile % 4 == 0:
         return out + _store_tile_packed_reads(spec, base, lut)
     for r in range(spec.tile):
@@ -341,12 +447,20 @@ def _store_tile_packed_reads(spec: GemmTargetSpec, base: Operation, lut) -> list
     extended; the rebased LUT accepts zero-extended indices).
     """
     out: list[Operation] = []
+    # Word stores need every tile row word-aligned: base = out + m*N + n with
+    # n a multiple of the tile, so N and the output address must be too.
+    word_store = (
+        lut is None
+        and not spec.packed_output_addr
+        and spec.n % 4 == 0
+        and spec.output_addr % 4 == 0
+    )
     for r in range(spec.tile):
         for group in range(0, spec.tile, 4):
             index = rv32.LiOp(r * spec.tile + group)
             word = loom_riscv.ReadResult4Op(index.rd)
             out += [index, word]
-            if lut is None and not spec.packed_output_addr:
+            if word_store:
                 out.append(riscv.SwOp(base.rd, word.rd, r * spec.n + group))
                 continue
             for b in range(4):
@@ -387,7 +501,7 @@ def _store_result_row(
     index_ops, index_base = _tile_channel(ctx.spec, row_iv, zero.rd)
     out: list[Operation] = [m_row, *row_offset_ops, col0, base, row_ptr, zero, *index_ops]
     lut = None
-    if ctx.spec.store_lut_addr:
+    if ctx.spec.cpu_store_lut:
         # Row-major store through the consumer's requant LUT (rebased table).
         lut = rv32.LiOp(ctx.spec.store_lut_addr + 128)
         out.append(lut)

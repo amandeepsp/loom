@@ -43,7 +43,7 @@ def compile_c_kernel(name: str, source: str, defines: dict[str, int]) -> bytes:
             "-ffreestanding", "-fno-builtin", "-fno-jump-tables", "-fno-pic",
             "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
             *[f"-D{k}={v}" for k, v in defines.items()],
-            "-c", str(KERNEL_DIR / source), "-o", str(obj),
+            f"-I{KERNEL_DIR}", "-c", str(KERNEL_DIR / source), "-o", str(obj),
         ]
         _run([str(c) for c in cmd])
         info = _run_output([str(readobj), "--relocations", "--sections", str(obj)])

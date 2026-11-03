@@ -43,6 +43,7 @@ class TestEpilogue:
             ctx.set(dut.last_in, 0)
 
             # Wait for pipeline (1 cycle SRDHM + 1 cycle done registration)
+            await ctx.tick()  # clamp/LUT register stage
             await ctx.tick()
             assert ctx.get(dut.done) == 1
 
@@ -93,6 +94,7 @@ class TestEpilogue:
             ctx.set(dut.last_in, 0)
 
             # Wait for done (pipeline drains last result)
+            await ctx.tick()  # clamp/LUT register stage
             await ctx.tick()
             assert ctx.get(dut.done) == 1
 
@@ -148,6 +150,7 @@ class TestEpilogue:
             await ctx.tick()
 
             ctx.set(dut.last_in, 0)
+            await ctx.tick()  # clamp/LUT register stage
             await ctx.tick()
             assert ctx.get(dut.done) == 1
 
@@ -187,6 +190,7 @@ class TestEpilogue:
 
             # Pipeline draining
             assert ctx.get(dut.done) == 0
+            await ctx.tick()  # clamp/LUT register stage
             await ctx.tick()
             assert ctx.get(dut.done) == 1  # fires here
 
@@ -224,6 +228,8 @@ class TestEpilogue:
             await ctx.tick()
             ctx.set(dut.first_in, 0)
             ctx.set(dut.last_in, 0)
+
+            await ctx.tick()  # clamp/LUT register stage
 
             await ctx.tick()
             assert ctx.get(dut.done) == 1

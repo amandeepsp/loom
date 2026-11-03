@@ -85,6 +85,13 @@ class CfuDmaAdapter(Module):
             dma_reader.source.ready.eq(1),
         ]
 
+        # Done *and* every beat delivered (same CSR as the board bitstream).
+        from litex.soc.interconnect.csr import CSRStatus
+        dma_reader._drained = CSRStatus(name="drained",
+            description="Done and every requested beat delivered to the CFU scratchpad.")
+        self.comb += dma_reader._drained.status.eq(
+            dma_reader.enable & dma_reader._done.status & ~self.busy & ~self.en)
+
         self.sync += [
             If(~dma_reader.enable,
                 self.busy.eq(0),

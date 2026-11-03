@@ -480,3 +480,84 @@ class TestKeepAct:
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
         sim.run()
+
+
+class TestResultLutAndColumnRead:
+    def test_lut_mapped_column_reads(self):
+        ROWS, COLS, K = 8, 8, 3
+        rng = np.random.default_rng(5)
+        A = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+        lut = rng.integers(-128, 128, size=256, dtype=np.int16)  # lut[byte(x)]
+        C = A.astype(np.int32) @ B.astype(np.int32)
+        plain = [[ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127)
+                  for c in range(COLS)] for r in range(ROWS)]
+        mapped = [[int(lut[v & 0xFF]) for v in row] for row in plain]
+        words = [int.from_bytes(bytes(int(x) & 0xFF for x in lut[4 * i:4 * i + 4]), "little")
+                 for i in range(64)]
+        act = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        dut = Top(TopConfig(rows=ROWS, cols=COLS))
+
+        def col_word(table, r0, c):
+            return int.from_bytes(bytes(table[r0 + i][c] & 0xFF for i in range(4)), "little")
+
+        async def testbench(ctx):
+            n = ROWS * COLS
+            await write_per_channel_params(ctx, dut, [0] * n, [0x7FFFFFFF] * n, [0] * n)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            for i, w in enumerate(words):
+                await cfu_op(ctx, dut, funct3=3, funct7=3, in0=i, in1=w)
+            for lut_on, table in ((0, plain), (1, mapped)):
+                await cfu_op(ctx, dut, funct3=3, funct7=4, in0=0, in1=lut_on)
+                await dma_fill(ctx, dut.dma_act, act)
+                await dma_fill(ctx, dut.dma_wgt, wgt)
+                await run_tile(ctx, dut, k=K, first=True, last=True)
+                for r in range(ROWS):
+                    for c in range(COLS):
+                        got = to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=r * COLS + c, in1=0))
+                        assert got == table[r][c], (lut_on, r, c)
+                for r0 in (0, 4):
+                    for c in range(COLS):
+                        got = await cfu_op(ctx, dut, funct3=4, funct7=2, in0=r0 * COLS + c, in1=0)
+                        assert (got & 0xFFFFFFFF) == col_word(table, r0, c), (lut_on, r0, c)
+            await cfu_op(ctx, dut, funct3=3, funct7=4, in0=0, in1=0)
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()
+
+
+class TestWriteAct:
+    def test_cpu_written_activations(self):
+        ROWS, COLS, K = 8, 8, 5
+        rng = np.random.default_rng(9)
+        A = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+        C = A.astype(np.int32) @ B.astype(np.int32)
+        expected = [ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127)
+                    for r in range(ROWS) for c in range(COLS)]
+        lines = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        dut = Top(TopConfig(rows=ROWS, cols=COLS))
+
+        async def testbench(ctx):
+            n = ROWS * COLS
+            await write_per_channel_params(ctx, dut, [0] * n, [0x7FFFFFFF] * n, [0] * n)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await cfu_op(ctx, dut, funct3=6, funct7=1, in0=0, in1=0)
+            for line in lines:
+                await cfu_op(ctx, dut, funct3=6, funct7=0,
+                             in0=line & 0xFFFFFFFF, in1=(line >> 32) & 0xFFFFFFFF)
+            await dma_fill(ctx, dut.dma_wgt, wgt)
+            await run_tile(ctx, dut, k=K, first=True, last=True)
+            for i, e in enumerate(expected):
+                assert to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0)) == e, i
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()

@@ -164,6 +164,14 @@ def xor(rd: int, rs1: int, rs2: int) -> int:
     return encode_r_type(opcode=0x33, funct3=4, funct7=0, rd=rd, rs1=rs1, rs2=rs2)
 
 
+def or_(rd: int, rs1: int, rs2: int) -> int:
+    return encode_r_type(opcode=0x33, funct3=6, funct7=0, rd=rd, rs1=rs1, rs2=rs2)
+
+
+def andi(rd: int, rs1: int, imm: int) -> int:
+    return encode_i_type(opcode=0x13, funct3=7, rd=rd, rs1=rs1, imm=imm)
+
+
 def slli(rd: int, rs1: int, shamt: int) -> int:
     if not 0 <= shamt < 32:
         raise ValueError(f"shamt={shamt} does not fit in RV32 shift immediate")

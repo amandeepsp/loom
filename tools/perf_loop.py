@@ -274,7 +274,7 @@ def host_pack(layer, source: np.ndarray, tile: int, padded_m: int) -> np.ndarray
     return a.reshape(padded_m // tile, tile, layer.k).transpose(0, 2, 1).reshape(-1)
 
 
-def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
+def layer_errors(artifact, onnx_path: Path, transport, debug: dict | None = None) -> dict[str, int]:
     """Wrong bytes per layer vs exact host recomputation, for pack and GEMM.
 
     `<layer>:pack` compares the board's packed input with host_pack() of the
@@ -307,7 +307,8 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
             weight = weight[t_idx * layer.n + c_idx]
         pin = buffers[k["packed_input_buffer"]]
         out = buffers[k["output_buffer"]]
-        cpu_kernel = k.get("kind", "").endswith("_cpu")
+        # CPU kernels and act_write-fused GEMMs have no packed input buffer.
+        cpu_kernel = k.get("kind", "").endswith(("_cpu", "_fused"))
         want = host_pack(layer, prev_out, tile, pm)
         # CPU kernels read their source directly (no packed buffer): check
         # their output against the host model of the whole layer instead.
@@ -331,6 +332,15 @@ def layer_errors(artifact, onnx_path: Path, transport) -> dict[str, int]:
         # Only real rows are defined for the 2-D pack; conv packs define all.
         rows = np.arange(pm).reshape(pm // tile, 1, tile) < (m if layer.packing is None else pm)
         errors[k["name"] + ":pack"] = int(((got != want3) & rows).sum())
+        if debug is not None and errors[k["name"] + ":pack"]:
+            bad = (got != want3) & rows  # [m_tile, k, tile]
+            debug[k["name"]] = {
+                "tiles": np.nonzero(bad.any(axis=(1, 2)))[0].tolist(),
+                "k_rows": np.nonzero(bad.any(axis=(0, 2)))[0].tolist(),
+                "lanes": np.nonzero(bad.any(axis=(0, 1)))[0].tolist(),
+                "got_t0": got[0, :8].tolist(),
+                "want_t0": want3[0, :8].tolist(),
+            }
         prev_out = actual.reshape(-1)
     return errors
 

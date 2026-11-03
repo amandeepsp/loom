@@ -4,12 +4,17 @@ Accepts INT32 accumulator values one-per-cycle from the sequencer,
 produces INT8 outputs stored in internal result registers.
 
 Pipeline: +bias (comb) -> SRDHM (1 reg stage) -> RDBPOT (comb)
-          -> +offset (comb) -> clamp (comb) -> INT8
+          -> +offset (comb) -> clamp (comb) -> INT8 (reg) -> optional LUT
 
-Latency: 1 cycle (SRDHM register). Throughput: 1 result/cycle after fill.
+Latency: 2 cycles (SRDHM register, then clamp/LUT register).
+Throughput: 1 result/cycle after fill.
+
+The optional 256-entry LUT maps each INT8 result through the next layer's
+input requantization table (stored as 64 little-endian words, indexed by the
+result's two's-complement byte), so fused stores need no CPU table lookup.
 """
 
-from amaranth import Array, Cat, Module, Signal, signed, unsigned
+from amaranth import Array, Cat, Const, Module, Signal, signed, unsigned
 from amaranth.lib.data import StructLayout
 from amaranth.lib.enum import IntEnum
 from amaranth.lib.memory import Memory
@@ -32,8 +37,9 @@ class Epilogue(Component):
     Data is valid on every cycle from first_in through last_in (inclusive).
     """
 
-    def __init__(self, num_results=16, acc_width=32, out_width=8):
+    def __init__(self, num_results=16, acc_width=32, out_width=8, cols=None):
         self._num_results = num_results
+        self._cols = cols
         self._acc_width = acc_width
         self._out_width = out_width
 
@@ -56,6 +62,13 @@ class Epilogue(Component):
             "out_addr": In(ceil_log2(num_results)),
             "out_data": Out(signed(out_width)),
             "out_data4": Out(32),
+            # Column readback: rows r0..r0+3 of column c (index r0*cols + c).
+            "out_data4col": Out(32),
+            # Result LUT (64 x 32-bit words) and its enable
+            "lut_wr_addr": In(6),
+            "lut_wr_data": In(32),
+            "lut_wr_en": In(1),
+            "lut_en": In(1),
         }
 
         super().__init__(ports)
@@ -114,6 +127,33 @@ class Epilogue(Component):
             last_out.eq(self.last_in),
         ]
 
+        # --- Stage 2: register the clamped result; LUT read in parallel ---
+        clamped_r = Signal(signed(self._out_width))
+        byte_sel = Signal(2)
+        valid_out2 = Signal()
+        last_out2 = Signal()
+        m.d.sync += [
+            clamped_r.eq(clamped),
+            byte_sel.eq(clamped[0:2]),
+            valid_out2.eq(valid_out),
+            last_out2.eq(last_out),
+        ]
+        lut_mem = Memory(shape=32, depth=64, init=[])
+        m.submodules.lut_mem = lut_mem
+        lut_wr = lut_mem.write_port()
+        m.d.comb += [
+            lut_wr.addr.eq(self.lut_wr_addr),
+            lut_wr.data.eq(self.lut_wr_data),
+            lut_wr.en.eq(self.lut_wr_en),
+        ]
+        lut_rd = lut_mem.read_port(domain="sync")
+        m.d.comb += lut_rd.addr.eq(clamped[2:8])
+        final = Signal(signed(self._out_width))
+        with m.If(self.lut_en):
+            m.d.comb += final.eq(lut_rd.data.word_select(byte_sel, 8))
+        with m.Else():
+            m.d.comb += final.eq(clamped_r)
+
         # --- Result storage ---
         results = Array(
             Signal(signed(self._out_width), name=f"epi_r_{i}") for i in range(num)
@@ -121,12 +161,12 @@ class Epilogue(Component):
         write_idx = Signal(range(num))
 
         m.d.sync += self.done.eq(0)
-        with m.If(valid_out):
+        with m.If(valid_out2):
             m.d.sync += [
-                results[write_idx].eq(clamped),
+                results[write_idx].eq(final),
                 write_idx.eq(write_idx + 1),
             ]
-            with m.If(last_out):
+            with m.If(last_out2):
                 m.d.sync += [
                     self.done.eq(1),
                     write_idx.eq(0),
@@ -138,6 +178,18 @@ class Epilogue(Component):
         base4 = self.out_addr & ~3
         m.d.comb += self.out_data4.eq(Cat(
             results[base4], results[base4 + 1], results[base4 + 2], results[base4 + 3]))
+        # Column readback (cols a power of two, rows a multiple of 4): index
+        # bits are [c | k | rest] for rows r0 + k, so each byte is a small mux.
+        cols = self._cols
+        if cols and cols & (cols - 1) == 0 and num % (4 * cols) == 0:
+            lc = ceil_log2(cols)
+            top = ceil_log2(num)
+            def col_index(k):
+                parts = [self.out_addr[:lc], Const(k, 2)] if lc else [Const(k, 2)]
+                if top > lc + 2:
+                    parts.append(self.out_addr[lc + 2:top])
+                return Cat(*parts)
+            m.d.comb += self.out_data4col.eq(Cat(*(results[col_index(k)] for k in range(4))))
 
         return m
 

@@ -86,3 +86,37 @@ def test_sim_model_binary_exec_model(sim_port):
         f"expected={result.cpu_output.tolist()}"
     )
     assert result.loom_pred == result.cpu_pred == result.label
+
+
+def test_sim_mobilenet_layers_exact(sim_port):
+    """MobileNet on the current RTL: every pack and GEMM bit-exact vs host.
+
+    Uses the CFU features the sim build implements (build/sim/loom_cfu_features
+    or $LOOM_CFU_FEATURES), so new RTL paths can be checked before a bitstream.
+    """
+    from compiler.backend.reference import OnnxReference, dataset_for_shape, load_sample
+    from compiler.backend.runtime import ModelBinaryArtifact, ModelBinaryRuntime
+    from tools.perf_loop import MODELS, layer_errors
+
+    onnx_path = MODELS["mobilenet"]
+    compiled = compile_onnx_model(onnx_path, csr_json=SIM_CSR)
+    artifact = ModelBinaryArtifact.from_bytes(compiled.to_bytes(include_debug_sections=False))
+    reference = OnnxReference(onnx_path)
+    sample = load_sample(dataset_for_shape(reference.boundary.input_shape), 0, reference)
+    shape = tuple(artifact.manifest["runtime_contract"]["input"]["shape"])
+    transport = TcpTransport(sim_port, timeout_s=3600)
+    try:
+        result = ModelBinaryRuntime(artifact, transport).run_quantized(
+            sample.int8_input.reshape(shape))
+        debug: dict = {}
+        errors = layer_errors(artifact, onnx_path, transport, debug)
+    finally:
+        transport.close()
+    log.info("mobilenet sim: %d cycles", result.cycles)
+    wrong = {name: n for name, n in errors.items() if n}
+    for name, info in debug.items():
+        log.info("%s pack mismatches: tiles %s k_rows %s lanes %s", name,
+                 info["tiles"][:40], info["k_rows"][:40], info["lanes"])
+        log.info("%s tile0 got  %s", name, info["got_t0"])
+        log.info("%s tile0 want %s", name, info["want_t0"])
+    assert not wrong, f"wrong bytes per layer: {wrong}"

@@ -26,6 +26,7 @@ from hardware.decoder.instructions import (
     ConfigInstruction,
     ReadResultInstruction,
     PerfCounterInstruction,
+    WriteActInstruction,
 )
 
 
@@ -88,6 +89,7 @@ class Top(Cfu):
         m.submodules.i_config = self.i_config = ConfigInstruction()
         m.submodules.i_read_result = self.i_read_result = ReadResultInstruction()
         m.submodules.i_perf_counter = self.i_perf_counter = PerfCounterInstruction()
+        m.submodules.i_write_act = self.i_write_act = WriteActInstruction()
         return {
             0: self.i_compute_start,
             1: self.i_compute_wait,
@@ -95,6 +97,7 @@ class Top(Cfu):
             3: self.i_config,
             4: self.i_read_result,
             5: self.i_perf_counter,
+            6: self.i_write_act,
         }
 
     def elaborate(self, platform):
@@ -130,6 +133,7 @@ class Top(Cfu):
             num_results=self.config.num_results,
             acc_width=self.config.acc_width,
             out_width=self.config.in_width,
+            cols=cols,
         )
         m.submodules.epi = epi
 
@@ -146,7 +150,20 @@ class Top(Cfu):
 
         # === DMA → Scratchpad fill bank ===================================
 
-        wiring.connect(m, wiring.flipped(self.dma_act), act_sp.wr)
+        # Activation fill bank: DMA, or CPU lines via WRITE_ACT (funct3=6).
+        i_wa = self.i_write_act
+        with m.If(i_wa.wr_en):
+            m.d.comb += [
+                act_sp.wr.addr.eq(i_wa.wr_addr),
+                act_sp.wr.data.eq(i_wa.wr_data),
+                act_sp.wr.en.eq(1),
+            ]
+        with m.Else():
+            m.d.comb += [
+                act_sp.wr.addr.eq(self.dma_act.addr),
+                act_sp.wr.data.eq(self.dma_act.data),
+                act_sp.wr.en.eq(self.dma_act.en),
+            ]
         wiring.connect(m, wiring.flipped(self.dma_wgt), wgt_sp.wr)
 
         # === Scratchpad ↔ Sequencer =======================================
@@ -202,6 +219,10 @@ class Top(Cfu):
             epi.output_offset.eq(output_offset),
             epi.activation_min.eq(activation_min),
             epi.activation_max.eq(activation_max),
+            epi.lut_wr_addr.eq(i_cfg.lut_wr_addr),
+            epi.lut_wr_data.eq(i_cfg.lut_wr_data),
+            epi.lut_wr_en.eq(i_cfg.lut_wr_en),
+            epi.lut_en.eq(i_cfg.lut_en),
         ]
 
         # === Instruction → Datapath wiring ================================
@@ -218,12 +239,18 @@ class Top(Cfu):
         ]
 
         # COMPUTE_WAIT ← Sequencer (latched to prevent race with done pulse)
+        # Completion seen by COMPUTE_WAIT. A new COMPUTE_START clears it in the
+        # op's own cycle, and done is masked until the (registered) start
+        # pulse reaches the sequencer, so a WAIT issued right after START can
+        # never return on the previous tile's done.
         seq_done_latch = Signal()
-        with m.If(seq.done):
-            m.d.sync += seq_done_latch.eq(1)
-        with m.If(i_cs.seq_start):
+        start_pending = i_cs.start | i_cs.seq_start
+        with m.If(i_cs.start):
             m.d.sync += seq_done_latch.eq(0)
-        m.d.comb += self.i_compute_wait.seq_done.eq(seq.done | seq_done_latch)
+        with m.Elif(seq.done & ~i_cs.seq_start):
+            m.d.sync += seq_done_latch.eq(1)
+        m.d.comb += self.i_compute_wait.seq_done.eq(
+            ~start_pending & (seq.done | seq_done_latch))
 
         m.d.comb += [
             self.seq_state_debug.eq(seq.state_debug),
@@ -285,6 +312,7 @@ class Top(Cfu):
             epi.out_addr.eq(i_rr.out_addr),
             i_rr.out_data.eq(epi.out_data),
             i_rr.out_data4.eq(epi.out_data4),
+            i_rr.out_data4col.eq(epi.out_data4col),
         ]
 
         return m

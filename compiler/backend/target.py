@@ -87,6 +87,19 @@ class GemmTargetSpec:
     # replacing the next layer's separate pack step.
     packed_output_addr: int = 0
     store_lut_addr: int = 0
+    # Channel-major (CHW) store: element (m, c) goes to output_addr + c *
+    # output_channel_stride + m, feeding a depthwise consumer's dwpack kernel.
+    output_channel_stride: int = 0
+    # `result_lut` CFU: the epilogue maps results through a 256-entry LUT
+    # (cfu_lut_addr: 256 bytes indexed by the result's unsigned byte, uploaded
+    # once per GEMM; 0 disables it) and READ_RESULT funct7=2 reads columns.
+    result_lut: bool = False
+    cfu_lut_addr: int = 0
+
+    @property
+    def cpu_store_lut(self) -> bool:
+        """The CPU applies store_lut_addr itself (no CFU result LUT)."""
+        return bool(self.store_lut_addr) and not (self.result_lut and self.cfu_lut_addr)
 
     @property
     def a_k_stride(self) -> int:

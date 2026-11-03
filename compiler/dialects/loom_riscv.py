@@ -169,6 +169,46 @@ class ReadResult4Op(LoomCustom0Op):
 
 
 @irdl_op_definition
+class ReadResult4ColOp(LoomCustom0Op):
+    """Read four int8 results down a column (rows r0..r0+3 of column c,
+    index r0 * cols + c), packed little-endian (READ_RESULT funct7=2,
+    `result_lut` CFU)."""
+
+    name = "loom_riscv.read_result4col"
+
+    index = operand_def(riscv.IntRegisterType)
+    rd = result_def(riscv.IntRegisterType)
+
+    def __init__(
+        self,
+        index: SSAValue | Operation,
+        *,
+        rd: riscv.IntRegisterType = riscv.Registers.UNALLOCATED_INT,
+    ):
+        super().__init__(operands=[index], result_types=[rd])
+
+    def custom0_operands(self) -> tuple[int, int, int, int, int]:
+        return (4, 2, _reg_index(self.rd.type), _reg_index(self.index.type), 0)
+
+
+@irdl_op_definition
+class WriteLutOp(LoomCustom0Op):
+    """Write one 32-bit word (4 entries) of the CFU result LUT (config
+    funct7=3, `result_lut` CFU)."""
+
+    name = "loom_riscv.write_lut"
+
+    index = operand_def(riscv.IntRegisterType)
+    value = operand_def(riscv.IntRegisterType)
+
+    def __init__(self, index: SSAValue | Operation, value: SSAValue | Operation):
+        super().__init__(operands=[index, value])
+
+    def custom0_operands(self) -> tuple[int, int, int, int, int]:
+        return (3, 3, 0, _reg_index(self.index.type), _reg_index(self.value.type))
+
+
+@irdl_op_definition
 class ReadResultOp(LoomCustom0Op):
     """Read one int8 result lane from the CFU result buffer."""
 
@@ -212,6 +252,8 @@ LoomRISCV = Dialect(
         WriteConfigOp,
         ReadResultOp,
         ReadResult4Op,
+        ReadResult4ColOp,
+        WriteLutOp,
     ],
     [],
 )

@@ -107,6 +107,15 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
         len(mr.k_regions) == 1
         and mr.k_regions[0].upper - mr.k_regions[0].lower <= mr.k_regions[0].step
     )
+    n_tiles = (region.upper - region.lower) // region.step
+    m_tiles = -(-mr.upper // mr.step)
+    if (ctx.spec.keep_act and ctx.spec.col_params and not ctx.spec.input_n_k_offset
+            and single_chunk and 1 < m_tiles < n_tiles):
+        # Few M tiles, many N tiles: M outer, activations kept per M tile.
+        # Re-uploads each N tile's params per M tile, so only worth it with
+        # col_params (24 writes instead of 192; slower without, measured).
+        return _for_ops(0, mr.upper, mr.step,
+                        lambda m_iv: _n_region_single_m_prefetch_ops(ctx, region, m_iv))
     if (ctx.spec.keep_wgt and single_chunk and mr.upper >= 2 * mr.step):
         return _n_region_keep_wgt_prefetch_ops(ctx, region)
     if (ctx.spec.keep_wgt and single_chunk and mr.upper <= mr.step
@@ -194,7 +203,9 @@ def _n_region_keep_act_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[O
     ]
 
 
-def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
+def _n_region_single_m_prefetch_ops(
+    ctx: RiscvLoweringContext, region: NRegion, m_reg: SSAValue | None = None,
+) -> list[Operation]:
     """Single M tile, many N tiles: tile n + 1's DMAs overlap tile n.
 
     Per N tile: upload params, start compute (swaps both banks), kick the
@@ -213,13 +224,19 @@ def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) 
     # GEMM is block-diagonal) are DMA'd once; flag bit 3 keeps their bank.
     keep_act = ctx.spec.keep_act and not ctx.spec.input_n_k_offset
 
-    def kick(n_reg: SSAValue, with_act: bool) -> list[Operation]:
+    def m_value() -> tuple[list[Operation], SSAValue]:
+        if m_reg is not None:
+            return [], m_reg
         m0 = rv32.LiOp(0)
+        return [m0], m0.rd
+
+    def kick(n_reg: SSAValue, with_act: bool) -> list[Operation]:
+        m_ops, m_val = m_value()
         k0 = rv32.LiOp(kr.lower)
         wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_reg, k0.rd)
-        ops: list[Operation] = [m0, k0, *wgt_ops]
+        ops: list[Operation] = [*m_ops, k0, *wgt_ops]
         if with_act:
-            act_ops, act_addr = _activation_dma_addr(ctx.spec, m0.rd, k0.rd, n_reg)
+            act_ops, act_addr = _activation_dma_addr(ctx.spec, m_val, k0.rd, n_reg)
             ops += [*act_ops, *_dma_kick_ops(act, act_addr, nbytes)]
         return [*ops, *_dma_kick_ops(wgt, wgt_addr, nbytes)]
 
@@ -237,14 +254,14 @@ def _n_region_single_m_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) 
             flags = with_keep.rd
         k_count = rv32.LiOp(kr.k_count)
         n_next = riscv.AddiOp(n_iv, region.step)
-        m0 = rv32.LiOp(0)
+        m_ops, m_val = m_value()
         return [
             *_epilogue_ops(ctx, region.n_count, n_iv),
             k0, *flags_ops, k_count,
             loom_riscv.ComputeStartOp(flags, k_count.rd),
             n_next, *kick(n_next.rd, with_act=not keep_act),
             loom_riscv.ComputeWaitOp(),
-            m0, *_store_result_ops(ctx, region.n_count, m0.rd, n_iv),
+            *m_ops, *_store_result_ops(ctx, region.n_count, m_val, n_iv),
             *_dma_complete_ops(ctx.csr, [wgt] if keep_act else [act, wgt]),
         ]
 

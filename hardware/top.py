@@ -10,7 +10,7 @@ import argparse
 import re
 from dataclasses import dataclass
 
-from amaranth import ClockSignal, Module, ResetSignal, Signal, signed, unsigned
+from amaranth import ClockSignal, Module, Mux, ResetSignal, Signal, signed, unsigned
 from amaranth.back.verilog import convert
 from amaranth.lib import wiring
 
@@ -79,6 +79,13 @@ class Top(Cfu):
             self.dma_wgt.addr, self.dma_wgt.data, self.dma_wgt.en,
             self.dma_act_busy, self.dma_wgt_busy,
         ]
+        # Result write-back stream (to a LiteDRAM DMA writer in the SoC):
+        # one beat per output column, 8 rows = 64 bits, at a byte address.
+        self.wb_valid = Signal(name="wb_valid")
+        self.wb_ready = Signal(name="wb_ready")
+        self.wb_addr = Signal(32, name="wb_addr")
+        self.wb_data = Signal(64, name="wb_data")
+        self.ports += [self.wb_valid, self.wb_ready, self.wb_addr, self.wb_data]
         self.seq_state_debug = Signal(8, name="seq_state_debug")
         self.seq_busy_debug = Signal(name="seq_busy_debug")
         self.error_warn_debug = Signal(name="error_warn_debug")
@@ -287,8 +294,36 @@ class Top(Cfu):
             m.d.sync += seq_done_latch.eq(0)
         with m.Elif(seq.done & ~i_cs.seq_start):
             m.d.sync += seq_done_latch.eq(1)
+        # Result write-back: armed by a COMPUTE_START of a last K chunk while
+        # enabled (base latched then), runs after the epilogue, and holds
+        # COMPUTE_WAIT until every column beat is accepted.
+        i_cfg = self.i_config
+        wb_armed = Signal()
+        wb_active = Signal()
+        wb_base = Signal(32)
+        wb_col = Signal(4)
+        wb_addr = Signal(32)
+        wb_ncols = Signal(4)
+        m.d.comb += wb_ncols.eq(Mux(i_cfg.wb_ncols == 0, 8, i_cfg.wb_ncols))
+        with m.If(i_cs.start):
+            m.d.sync += [
+                wb_armed.eq(i_cfg.wb_enable & i_cs.in0[1]),
+                wb_base.eq(i_cfg.wb_base_next),
+            ]
+        with m.Elif(wb_armed & seq.done & ~i_cs.seq_start):
+            m.d.sync += [wb_armed.eq(0), wb_active.eq(1), wb_col.eq(0), wb_addr.eq(wb_base)]
+        with m.If(wb_active & self.wb_ready):
+            m.d.sync += [wb_col.eq(wb_col + 1), wb_addr.eq(wb_addr + i_cfg.wb_cstride)]
+            with m.If(wb_col == wb_ncols - 1):
+                m.d.sync += wb_active.eq(0)
+        m.d.comb += [
+            self.wb_valid.eq(wb_active),
+            self.wb_addr.eq(wb_addr),
+            self.epi.wb_col.eq(Mux(wb_active, wb_col[:3], self.i_read_result.out_addr[:3])),
+            self.wb_data.eq(self.epi.out_col8),
+        ]
         m.d.comb += self.i_compute_wait.seq_done.eq(
-            ~start_pending & (seq.done | seq_done_latch))
+            ~start_pending & (seq.done | seq_done_latch) & ~wb_armed & ~wb_active)
 
         m.d.comb += [
             self.seq_state_debug.eq(seq.state_debug),
@@ -349,7 +384,6 @@ class Top(Cfu):
         m.d.comb += [
             epi.out_addr.eq(i_rr.out_addr),
             i_rr.out_data.eq(epi.out_data),
-            i_rr.out_data4.eq(epi.out_data4),
             i_rr.out_data4col.eq(epi.out_data4col),
         ]
 

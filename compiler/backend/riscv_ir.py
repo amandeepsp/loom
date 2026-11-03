@@ -73,10 +73,40 @@ def _replace_module_body(module: ModuleOp, new_ops: tuple[Operation, ...]) -> No
 
 
 def _schedule_to_module(ctx: RiscvLoweringContext, schedule: AffineGemmSchedule) -> ModuleOp:
-    out: list[Operation] = _result_lut_ops(ctx.spec)
+    out: list[Operation] = [*_result_lut_ops(ctx.spec), *_wb_config_ops(ctx.spec, True)]
     for region in schedule.n_regions:
         out.extend(_n_region_ops(ctx, region))
+    out.extend(_wb_config_ops(ctx.spec, False))
     return ModuleOp(out)
+
+
+def _wb_config_ops(spec: GemmTargetSpec, enable: bool) -> list[Operation]:
+    """Enable (all 8 columns, column stride) or disable result write-back."""
+    if not spec.result_wb:
+        return []
+    on = rv32.LiOp(1 if enable and spec.wb_stride else 0)
+    stride = rv32.LiOp(spec.wb_stride if enable else 0)
+    return [on, stride, loom_riscv.WriteConfig2Op(on.rd, stride.rd, register=6)]
+
+
+def _wb_base_ops(ctx: RiscvLoweringContext, m_reg: SSAValue, n_reg: SSAValue) -> list[Operation]:
+    """Next tile's write-back base (latched by COMPUTE_START): the address of
+    its column 0, row 0 in the packed (F1) or CHW output."""
+    spec = ctx.spec
+    if not spec.wb_stride:
+        return []
+    if spec.packed_output_addr:
+        m_ops, m_off = _mul_const(m_reg, spec.n)
+        n_ops, n_off = _mul_const(n_reg, spec.tile)
+        base_addr = spec.packed_output_addr
+    else:
+        m_ops, m_off = [], m_reg
+        n_ops, n_off = _mul_const(n_reg, spec.output_channel_stride)
+        base_addr = spec.output_addr
+    off = riscv.AddOp(m_off, n_off)
+    base0 = rv32.LiOp(base_addr)
+    base = riscv.AddOp(base0.rd, off.rd)
+    return [*m_ops, *n_ops, off, base0, base, loom_riscv.WriteConfigOp(base.rd, register=5)]
 
 
 def _result_lut_ops(spec: GemmTargetSpec) -> list[Operation]:
@@ -213,11 +243,11 @@ def _n_region_single_m_prefetch_ops(
         m_ops, m_val = m_value()
         return [
             *_epilogue_ops(ctx, region.n_count, n_iv),
-            k0, *flags_ops, k_count,
+            k0, *flags_ops, k_count, *m_ops, *_wb_base_ops(ctx, m_val, n_iv),
             loom_riscv.ComputeStartOp(flags, k_count.rd),
             n_next, *kick(n_next.rd, with_act=not keep_act),
             loom_riscv.ComputeWaitOp(),
-            *m_ops, *_store_result_ops(ctx, region.n_count, m_val, n_iv),
+            *_store_result_ops(ctx, region.n_count, m_val, n_iv),
             *_dma_complete_ops(ctx.csr, [wgt] if keep_act else [act, wgt]),
         ]
 
@@ -292,7 +322,7 @@ def _m_loop_keep_wgt_pipelined(
         addr_ops, addr = _activation_dma_addr(spec, m_reg, k0.rd, n_iv)
         return [k0, *addr_ops, *_dma_kick_ops(act, addr, nbytes)]
 
-    def start(keep: SSAValue | None) -> list[Operation]:
+    def start(keep: SSAValue | None, m_reg: SSAValue) -> list[Operation]:
         k0 = rv32.LiOp(kr.lower)
         flags_ops, flags = _compute_flags(spec, kr, k0.rd)
         ops: list[Operation] = [k0, *flags_ops]
@@ -302,14 +332,15 @@ def _m_loop_keep_wgt_pipelined(
             ops += [bit2, with_keep]
             flags = with_keep.rd
         k_count = rv32.LiOp(kr.k_count)
-        return [*ops, k_count, loom_riscv.ComputeStartOp(flags, k_count.rd)]
+        return [*ops, k_count, *_wb_base_ops(ctx, m_reg, n_iv),
+                loom_riscv.ComputeStartOp(flags, k_count.rd)]
 
     def body(m_iv: SSAValue) -> list[Operation]:
         zero = rv32.LiOp(0)
         not_first = riscv.SltuOp(zero.rd, m_iv)
         m_next = riscv.AddiOp(m_iv, mr.step)
         return [
-            zero, not_first, *start(not_first.rd),
+            zero, not_first, *start(not_first.rd, m_iv),
             m_next, *kick_act(m_next.rd),
             loom_riscv.ComputeWaitOp(),
             *_store_result_ops(ctx, n_count, m_iv, n_iv),
@@ -325,7 +356,7 @@ def _m_loop_keep_wgt_pipelined(
         assert mr.upper >= 2 * mr.step
         m1 = rv32.LiOp(mr.step)
         first = [
-            *start(None), m1, *kick_act(m1.rd), *after_first_start,
+            *start(None, m0.rd), m1, *kick_act(m1.rd), *after_first_start,
             loom_riscv.ComputeWaitOp(),
             *_store_result_ops(ctx, n_count, m0.rd, n_iv),
             *_dma_complete_ops(ctx.csr, [act]),
@@ -338,11 +369,11 @@ def _m_loop_keep_wgt_pipelined(
         m0, *kick_act(m0.rd), *_dma_complete_ops(ctx.csr, [act]),
         *first,
         *_for_ops(loop_lb, mr.upper - mr.step, mr.step, body),
-        one, *start(one.rd),
+        one, m_last, *start(one.rd, m_last.rd),
         # Also keeps COMPUTE_WAIT a few instructions after START.
         *_dma_stop_ops(act),
         loom_riscv.ComputeWaitOp(),
-        m_last, *_store_result_ops(ctx, n_count, m_last.rd, n_iv),
+        *_store_result_ops(ctx, n_count, m_last.rd, n_iv),
     ]
 
 
@@ -412,6 +443,7 @@ def _k_body(
         *([] if keep_wgt else _dma_stop_ops(ctx.csr.wgt_dma)),
         *flags_ops,
         k_count,
+        *_wb_base_ops(ctx, m_iv, n_iv),
         loom_riscv.ComputeStartOp(flags, k_count.rd),
     ]
 
@@ -446,6 +478,8 @@ def _store_result_ops(
     offset instead of re-deriving its address from scratch.
     """
     spec = ctx.spec
+    if spec.wb_stride:
+        return []  # the CFU's write-back DMA stores the tile
     if spec.output_channel_stride:
         return _store_result_tile_chw(ctx, n_count, m_iv, n_iv)
     if spec.packed_output_addr or (spec.tile - 1) * spec.n + n_count <= 2047:

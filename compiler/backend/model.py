@@ -943,6 +943,7 @@ def _compile_quantized_mobilenet(
             result_lut=result_lut,
             cfu_lut_addr=cfu_lut_addr,
             col_params="col_params" in cfu_features(csr_json),
+            result_wb="result_wb" in cfu_features(csr_json),
             packed_output_addr=fused_addr,
             store_lut_addr=fused_lut_addr,
             m=padded_m,
@@ -996,6 +997,7 @@ def _compile_quantized_mobilenet(
                 "ACT_CSR_ENABLE": csr_map.act_dma.enable, "ACT_CSR_LOOP": csr_map.act_dma.loop,
                 "ACT_CSR_DRAINED": csr_map.act_dma.drained,
                 "PARAM_ROWS": 1 if "col_params" in features else tile,
+                "WB": int("result_wb" in features),
             })
             asm = ""
             kind = layer.kind + "_fused"
@@ -1210,6 +1212,7 @@ def _compile_tosa_module(
             # Clears the sticky CFU result-LUT enable on result_lut bitstreams.
             result_lut="result_lut" in cfu_features(csr_json),
             col_params="col_params" in cfu_features(csr_json),
+            result_wb="result_wb" in cfu_features(csr_json),
         )
         riscv_code = b""
         if emit_code and csr_map is not None:

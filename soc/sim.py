@@ -195,6 +195,8 @@ class LoomSimSoC(SoCCore):
                     "i_dma_wgt__en":   wgt_adapter.en,
                     "i_dma_wgt_busy":  wgt_adapter.busy,
                 })
+                from soc.cfu_writeback import add_cfu_result_writer
+                self.cpu.cfu_params.update(add_cfu_result_writer(self, data_width=line_width))
 
         # Debug ------------------------------------------------------------------------------------
         if sim_debug:

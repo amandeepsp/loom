@@ -99,6 +99,14 @@ void loom_dwgemm(void) {
           PLANE);
     CFU_W(7, 1, 1, (u8)(ZP));
 #endif
+#ifndef WB
+#define WB 0
+#endif
+#if WB
+    /* Result write-back DMA: each tile's 8 columns go to
+     * OUT + m0 * MSTRIDE + (n0 + col) * CSTRIDE without CPU stores. */
+    CFU_W(3, 6, 1, CSTRIDE);
+#endif
 #if CFU_LUT_ADDR
     for (int i = 0; i < 64; ++i) CFU_W(3, 3, i, ((const u32a *)CFU_LUT_ADDR)[i]);
     CFU_W(3, 4, 0, 1);
@@ -158,6 +166,9 @@ void loom_dwgemm(void) {
 #endif
                 /* Tile t - 1: first | last, keep the weight bank after the
                  * group's first tile. */
+#if WB
+                CFU_W(3, 5, 0, OUT_ADDR + (t - 1) * 8 * MSTRIDE + g * 8 * CSTRIDE);
+#endif
                 CFU_W(0, 0, 3 | (t > 1 ? 4 : 0), KG);
                 /* The group's first compute swapped the weight banks; the fill
                  * bank stays idle for the rest of the group: prefetch g + 1. */
@@ -247,15 +258,20 @@ void loom_dwgemm(void) {
             if (t == 0) continue;
             (void)CFU_RD(1, 0, 0);
 
+#if !WB
             u8 *dst = (u8 *)OUT_ADDR + (t - 1) * 8 * MSTRIDE + g * 8 * CSTRIDE;
             for (int col = 0; col < 8; ++col) {
                 u32a *p = (u32a *)(dst + col * CSTRIDE);
                 p[0] = CFU_RD(4, 2, col);
                 p[1] = CFU_RD(4, 2, 32 + col);
             }
+#endif
         }
     }
 #if LINEGEN
     CFU_W(7, 1, 0, (u8)(ZP)); /* activation DMA back to the scratchpad */
+#endif
+#if WB
+    CFU_W(3, 6, 0, 0);
 #endif
 }

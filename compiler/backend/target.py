@@ -98,6 +98,20 @@ class GemmTargetSpec:
     # `col_params` CFU: epilogue params are read per column, so only the
     # row-0 slots (channel index = column) need uploading.
     col_params: bool = False
+    # `result_wb` CFU: a DMA writes each finished tile's columns to DRAM.
+    result_wb: bool = False
+
+    @property
+    def wb_stride(self) -> int:
+        """Column stride for result write-back (0: this GEMM stores on the CPU).
+
+        Needs column-contiguous output (next layer's packed tiles, or CHW),
+        the LUT applied in the CFU, and whole 8-column N tiles."""
+        if not self.result_wb or self.cpu_store_lut or self.n % self.tile:
+            return 0
+        if self.packed_output_addr:
+            return self.tile
+        return self.output_channel_stride
 
     @property
     def cpu_store_lut(self) -> bool:

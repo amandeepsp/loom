@@ -83,6 +83,13 @@ class ConfigInstruction(Instruction):
     lut_wr_data: Out(32)
     lut_wr_en: Out(1)
     lut_en: Out(1)
+    # funct7=5: next tile's result write-back base (byte address) = in1;
+    # funct7=6: write-back enable = in0[0], columns = in0[8:12] (0 = 8),
+    #           column stride (bytes) = in1[0:16].
+    wb_base_next: Out(32)
+    wb_enable: Out(1)
+    wb_ncols: Out(4)
+    wb_cstride: Out(16)
 
     def elaborate(self, platform):
         m = super().elaborate(platform)
@@ -94,6 +101,14 @@ class ConfigInstruction(Instruction):
         ]
         with m.If(self.start & (self.funct7 == 4)):
             m.d.sync += self.lut_en.eq(self.in1[0])
+        with m.If(self.start & (self.funct7 == 5)):
+            m.d.sync += self.wb_base_next.eq(self.in1)
+        with m.If(self.start & (self.funct7 == 6)):
+            m.d.sync += [
+                self.wb_enable.eq(self.in0[0]),
+                self.wb_ncols.eq(self.in0[8:12]),
+                self.wb_cstride.eq(self.in1[0:16]),
+            ]
 
         with m.If(self.start):
             with m.Switch(self.funct7):
@@ -112,24 +127,19 @@ class ReadResultInstruction(Instruction):
     """funct3=4: Single-cycle — read results from the epilogue store.
 
     funct7=0: one INT8 result (sign-extended) at index in0.
-    funct7=1: four INT8 results at indices in0..in0+3 (in0 a multiple of 4),
-              packed little-endian into one 32-bit word.
     funct7=2: four INT8 results down a column: rows r0..r0+3 of column c,
               in0 = r0 * cols + c (r0 a multiple of 4), packed little-endian.
     """
 
     out_addr: Out(32)
     out_data: In(signed(8))
-    out_data4: In(32)
     out_data4col: In(32)
 
     def elaborate(self, platform):
         m = super().elaborate(platform)
 
         m.d.comb += self.out_addr.eq(self.in0)
-        with m.If(self.funct7 == 1):
-            m.d.comb += self.output.eq(self.out_data4)
-        with m.Elif(self.funct7 == 2):
+        with m.If(self.funct7 == 2):
             m.d.comb += self.output.eq(self.out_data4col)
         with m.Else():
             m.d.comb += self.output.eq(self.out_data)

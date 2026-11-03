@@ -198,6 +198,11 @@ class _RiscvModuleEncoder:
                 rd = self._define(op.rd)
                 self.builder.emit(riscv.custom0(4, 2, rd=rd, rs1=index, rs2=0).encode())
                 self._finish_op(op)
+            case loom_riscv.WriteConfig2Op():
+                a = self._use(op.a)
+                b = self._use(op.b)
+                self.builder.emit(riscv.custom0(3, int(op.register.value.data), rd=0, rs1=a, rs2=b).encode())
+                self._finish_op(op)
             case loom_riscv.WriteLutOp():
                 index = self._use(op.index)
                 value = self._use(op.value)

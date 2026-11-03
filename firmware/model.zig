@@ -74,6 +74,8 @@ pub fn execute(addr: u32, len: u32) ExecError!u32 {
     clearDebug();
     if (!memory.rangeValid(addr, len)) return error.BadAddress;
     if (len < 12) return error.BadPayloadLen;
+    // Lines cached from a previous inference may predate DMA write-back.
+    invalidateDcache();
 
     const ptr: [*]const u8 = @ptrFromInt(addr);
     const data = ptr[0..len];
@@ -249,7 +251,23 @@ fn callCode(addr: u32, len: u32) ExecError!void {
     const Entry = *const fn () void;
     const entry: Entry = @ptrFromInt(addr);
     entry();
+    drainResultWriteback();
     flushDataCaches();
+}
+
+/// Wait until every CFU result write-back beat has reached DRAM, so the next
+/// step (DMA or CPU) reads the final data. No-op on bitstreams without it.
+fn drainResultWriteback() void {
+    if (@hasDecl(csr, "wb_dma_pending")) {
+        const pending: *const volatile u32 = @ptrFromInt(csr.wb_dma_pending);
+        while (pending.* != 0) {}
+    }
+}
+
+/// Drop dcache lines: needed before the CPU reads memory the result
+/// write-back DMA may have written (it bypasses the write-through dcache).
+pub fn invalidateDcache() void {
+    if (@hasDecl(csr, "wb_dma_pending")) asm volatile (".word(0x500F)");
 }
 
 /// Make CPU writes visible to the CFU DMA readers, which read DRAM directly.

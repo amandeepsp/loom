@@ -1,0 +1,123 @@
+diff --git a/litex_boards/targets/sipeed_tang_nano_20k.py b/litex_boards/targets/sipeed_tang_nano_20k.py
+index 6aefed8b..4bfa4144 100755
+--- a/litex_boards/targets/sipeed_tang_nano_20k.py
++++ b/litex_boards/targets/sipeed_tang_nano_20k.py
+@@ -79,9 +79,27 @@ def add_cfu_dma_bridge(soc, dma, *, addr_width, data_width, prefix):
+     wr_addr = Signal(addr_width, name=f"{prefix}_wr_addr")
+     wr_data = Signal(data_width, name=f"{prefix}_wr_data")
+     wr_en   = Signal(name=f"{prefix}_wr_en")
++    busy    = Signal(name=f"{prefix}_busy")
+ 
+     soc.comb += dma.source.ready.eq(1)
+     soc.sync += wr_en.eq(0)
++    soc.sync += If(~dma._enable.storage,
++        busy.eq(0),
++    ).Elif(dma.source.valid & dma.source.ready & dma.source.last,
++        busy.eq(0),
++    ).Elif(dma._enable.storage & ~dma._done.status,
++        busy.eq(1),
++    )
++
++    # `done` only means every read was *issued*; responses may still be in
++    # flight. `drained` additionally requires the last beat to have reached
++    # the scratchpad bridge, so software can start compute without a delay
++    # fence. Appended after the existing CSRs, so their addresses don't move.
++    from litex.soc.interconnect.csr import CSRStatus
++    dma._drained = CSRStatus(name="drained",
++        description="Done and every requested beat delivered to the CFU scratchpad.")
++    soc.comb += dma._drained.status.eq(
++        dma._enable.storage & dma._done.status & ~busy & ~wr_en)
+ 
+     if ratio == 1:
+         soc.sync += If(~dma._enable.storage,
+@@ -133,7 +151,7 @@ def add_cfu_dma_bridge(soc, dma, *, addr_width, data_width, prefix):
+             ),
+         )
+ 
+-    return wr_addr, wr_data, wr_en
++    return wr_addr, wr_data, wr_en, busy
+ 
+ 
+ class CfuLedDebug(LiteXModule):
+@@ -228,6 +246,10 @@ class BaseSoC(SoCCore):
+         self.crg = _CRG(platform, sys_clk_freq, with_hdmi=with_hdmi)
+ 
+         # SoCCore ----------------------------------------------------------------------------------
++        # --l2-size (default 128 here, as before); 0 drops the L2.
++        l2_size = kwargs.get("l2_size", 128)
++        if l2_size == 8192:  # SoCCore's generic default: keep this board's 128.
++            l2_size = 128
+         SoCCore.__init__(self, platform, sys_clk_freq, ident="LiteX SoC on Tang Nano 20K", **kwargs)
+ 
+         # SPI Flash: XT25F64B ----------------------------------------------------------------------
+@@ -277,7 +299,7 @@ class BaseSoC(SoCCore):
+             self.add_sdram("sdram",
+                 phy           = self.sdrphy,
+                 module        = M12L64322A(sys_clk_freq, "1:1"), # FIXME.
+-                l2_cache_size = 128,
++                l2_cache_size = l2_size,
+             )
+ 
+             # Two CSR-backed DMA readers, mirroring the simulation SoC setup.
+@@ -286,14 +308,14 @@ class BaseSoC(SoCCore):
+             self.act_dma = LiteDRAMDMAReader(port=act_port, fifo_depth=16, with_csr=True)
+             self.wgt_dma = LiteDRAMDMAReader(port=wgt_port, fifo_depth=16, with_csr=True)
+ 
+-            act_wr_addr, act_wr_data, act_wr_en = add_cfu_dma_bridge(
++            act_wr_addr, act_wr_data, act_wr_en, act_dma_busy = add_cfu_dma_bridge(
+                 self,
+                 self.act_dma,
+                 addr_width=cfu_act_addr_width,
+                 data_width=cfu_act_data_width,
+                 prefix="act",
+             )
+-            wgt_wr_addr, wgt_wr_data, wgt_wr_en = add_cfu_dma_bridge(
++            wgt_wr_addr, wgt_wr_data, wgt_wr_en, wgt_dma_busy = add_cfu_dma_bridge(
+                 self,
+                 self.wgt_dma,
+                 addr_width=cfu_wgt_addr_width,
+@@ -307,9 +329,11 @@ class BaseSoC(SoCCore):
+                     i_dma_act__addr = act_wr_addr,
+                     i_dma_act__data = act_wr_data,
+                     i_dma_act__en   = act_wr_en,
++                    i_dma_act_busy  = act_dma_busy,
+                     i_dma_wgt__addr = wgt_wr_addr,
+                     i_dma_wgt__data = wgt_wr_data,
+                     i_dma_wgt__en   = wgt_wr_en,
++                    i_dma_wgt_busy  = wgt_dma_busy,
+                     o_cfu_state_debug = cfu_state_debug,
+                     o_cfu_instr_debug = cfu_instr_debug,
+                     o_cfu_busy_debug  = cfu_busy_debug,
+@@ -317,8 +341,12 @@ class BaseSoC(SoCCore):
+                     o_seq_busy_debug  = seq_busy_debug,
+                     o_error_warn_debug = error_warn_debug,
+                 )
++                # Result write-back DMA (loom CFU, soc/cfu_writeback.py in the
++                # accel repo, which runs this build).
++                from soc.cfu_writeback import add_cfu_result_writer
++                cfu_params.update(add_cfu_result_writer(self, data_width=cfu_act_data_width))
+ 
+-            self.comb += dma_active.eq(self.act_dma._enable.storage | self.wgt_dma._enable.storage)
++            self.comb += dma_active.eq(act_dma_busy | wgt_dma_busy)
+ 
+         # Video ------------------------------------------------------------------------------------
+         if with_hdmi:
+@@ -379,6 +407,7 @@ def main():
+     parser = LiteXArgumentParser(platform=sipeed_tang_nano_20k.Platform, description="LiteX SoC on Tang Nano 20K.")
+     parser.add_target_argument("--flash",          action="store_true",      help="Flash bitstream.")
+     parser.add_target_argument("--sys-clk-freq",   default=48e6, type=float, help="System clock frequency.")
++    parser.add_target_argument("--pnr-seed",       default=1, type=int, help="Nextpnr placement/routing seed.")
+     parser.add_target_argument("--cfu-rows",             default=8,   type=int, help="CFU array row count.")
+     parser.add_target_argument("--cfu-cols",             default=8,   type=int, help="CFU array column count.")
+     parser.add_target_argument("--cfu-store-depth",      default=512, type=int, help="CFU scratchpad depth.")
+@@ -423,7 +452,9 @@ def main():
+ 
+     builder = Builder(soc, **parser.builder_argdict)
+     if args.build:
+-        builder.build(**parser.toolchain_argdict)
++        toolchain_args = parser.toolchain_argdict
++        toolchain_args["seed"] = args.pnr_seed
++        builder.build(**toolchain_args)
+ 
+     if args.load:
+         prog = soc.platform.create_programmer()

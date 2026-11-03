@@ -59,6 +59,8 @@ pub fn readMem(header: link.Header) void {
 
     var req: protocol.ReadMem.Req = undefined;
     uart.readBytes(std.mem.asBytes(&req));
+    // The result write-back DMA bypasses the dcache.
+    model.invalidateDcache();
 
     const data_len: u32 = req.len;
     if (data_len > std.math.maxInt(u16) or !rangeValid(req.addr, data_len)) {

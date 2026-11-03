@@ -381,7 +381,8 @@ class TestIntegration:
 
 
 class TestBatchA:
-    """Packed READ_RESULT (funct7=1) and keep_wgt (compute flag bit 2)."""
+    """keep_wgt (compute flag bit 2). (Packed READ_RESULT funct7=1 was
+    removed: unused, and its muxes cost placement headroom.)"""
 
     def test_packed_read_and_weight_reuse(self):
         ROWS, COLS, K = 4, 4, 2
@@ -409,10 +410,9 @@ class TestBatchA:
             await dma_fill(ctx, dut.dma_wgt, wgt)
             await run_tile(ctx, dut, k=K, first=True, last=True)
             exp = expected(A1)
-            for base in range(0, n, 4):
-                word = await cfu_op(ctx, dut, funct3=4, funct7=1, in0=base, in1=0)
-                got = [to_signed8((word >> (8 * i)) & 0xFF) for i in range(4)]
-                assert got == exp[base:base + 4], (base, got, exp[base:base + 4])
+            for i in range(n):
+                got = to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0))
+                assert got == exp[i], (i, got, exp[i])
             # Tile 2: new activations only; keep_wgt reuses the weight bank.
             await dma_fill(ctx, dut.dma_act, act(A2))
             await cfu_op(ctx, dut, funct3=0, funct7=0, in0=0b111, in1=K)
@@ -712,5 +712,58 @@ class TestLineGenGroups:
 
         sim = Simulator(dut)
         sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()
+
+
+class TestResultWriteback:
+    def test_writeback_beats_and_wait(self):
+        ROWS, COLS, K = 8, 8, 5
+        rng = np.random.default_rng(31)
+        A = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+        C = A.astype(np.int32) @ B.astype(np.int32)
+        res = [[ref_epilogue(int(C[r, c]), 0, 0x7FFFFFFF, 0, 0, -128, 127) for c in range(COLS)]
+               for r in range(ROWS)]
+        act = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        BASE, STRIDE = 0x40123400, 1088
+        dut = Top(TopConfig(rows=ROWS, cols=COLS))
+        beats = []
+
+        async def collector(ctx):
+            # Stall the writer for a while, then accept every beat.
+            ctx.set(dut.wb_ready, 0)
+            stalled = 0
+            while True:
+                await ctx.tick()
+                if ctx.get(dut.wb_valid):
+                    if stalled < 30:
+                        stalled += 1
+                        continue
+                    ctx.set(dut.wb_ready, 1)
+                    beats.append((ctx.get(dut.wb_addr), ctx.get(dut.wb_data)))
+
+        async def testbench(ctx):
+            await write_per_channel_params(ctx, dut, [0] * 8, [0x7FFFFFFF] * 8, [0] * 8)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await cfu_op(ctx, dut, funct3=3, funct7=6, in0=1, in1=STRIDE)
+            await cfu_op(ctx, dut, funct3=3, funct7=5, in0=0, in1=BASE)
+            await dma_fill(ctx, dut.dma_act, act)
+            await dma_fill(ctx, dut.dma_wgt, wgt)
+            await cfu_op(ctx, dut, funct3=0, funct7=0, in0=3, in1=K)
+            await cfu_op(ctx, dut, funct3=1, funct7=0, in0=0, in1=0)
+            # COMPUTE_WAIT returned: every beat must have been accepted.
+            assert len(beats) == 8, len(beats)
+            for c, (addr, data) in enumerate(beats):
+                assert addr == BASE + c * STRIDE, (c, hex(addr))
+                want = int.from_bytes(bytes(res[r][c] & 0xFF for r in range(ROWS)), "little")
+                assert data == want, (c, hex(data), hex(want))
+            await cfu_op(ctx, dut, funct3=3, funct7=6, in0=0, in1=0)
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(collector, background=True)
         sim.add_testbench(testbench)
         sim.run()

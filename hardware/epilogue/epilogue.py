@@ -14,7 +14,7 @@ input requantization table (stored as 64 little-endian words, indexed by the
 result's two's-complement byte), so fused stores need no CPU table lookup.
 """
 
-from amaranth import Array, Cat, Const, Module, Signal, signed, unsigned
+from amaranth import Array, Cat, Const, Module, Mux, Signal, signed, unsigned
 from amaranth.lib.data import StructLayout
 from amaranth.lib.enum import IntEnum
 from amaranth.lib.memory import Memory
@@ -61,9 +61,11 @@ class Epilogue(Component):
             # Result readback (active any time, outside pipeline)
             "out_addr": In(ceil_log2(num_results)),
             "out_data": Out(signed(out_width)),
-            "out_data4": Out(32),
             # Column readback: rows r0..r0+3 of column c (index r0*cols + c).
             "out_data4col": Out(32),
+            # Write-back readback: all rows of column wb_col.
+            "wb_col": In(3),
+            "out_col8": Out(64),
             # Result LUT (64 x 32-bit words) and its enable
             "lut_wr_addr": In(6),
             "lut_wr_data": In(32),
@@ -174,22 +176,17 @@ class Epilogue(Component):
 
         # Readback - always active
         m.d.comb += self.out_data.eq(results[self.out_addr])
-        # Packed readback: four consecutive results (index aligned to 4).
-        base4 = self.out_addr & ~3
-        m.d.comb += self.out_data4.eq(Cat(
-            results[base4], results[base4 + 1], results[base4 + 2], results[base4 + 3]))
-        # Column readback (cols a power of two, rows a multiple of 4): index
-        # bits are [c | k | rest] for rows r0 + k, so each byte is a small mux.
+        # Column readback: all rows of column wb_col (result write-back), and
+        # READ_RESULT's 4-row column reads as one half of it (the CFU drives
+        # wb_col from the read index when no write-back runs).
         cols = self._cols
-        if cols and cols & (cols - 1) == 0 and num % (4 * cols) == 0:
+        if cols and cols & (cols - 1) == 0 and num // cols == 8:
             lc = ceil_log2(cols)
-            top = ceil_log2(num)
-            def col_index(k):
-                parts = [self.out_addr[:lc], Const(k, 2)] if lc else [Const(k, 2)]
-                if top > lc + 2:
-                    parts.append(self.out_addr[lc + 2:top])
-                return Cat(*parts)
-            m.d.comb += self.out_data4col.eq(Cat(*(results[col_index(k)] for k in range(4))))
+            m.d.comb += self.out_col8.eq(Cat(*(
+                results[Cat(self.wb_col[:lc], Const(r, 3))] for r in range(8))))
+            # out_addr = r0 * cols + c with r0 in {0, 4}: bit lc + 2 picks the half.
+            m.d.comb += self.out_data4col.eq(
+                Mux(self.out_addr[lc + 2], self.out_col8[32:64], self.out_col8[0:32]))
 
         return m
 

@@ -169,6 +169,24 @@ class ReadResult4Op(LoomCustom0Op):
 
 
 @irdl_op_definition
+class WriteConfig2Op(LoomCustom0Op):
+    """Write a two-operand CFU configuration register (config funct7 =
+    register, in0 = a, in1 = b), e.g. result write-back enable/stride."""
+
+    name = "loom_riscv.write_config2"
+
+    register = prop_def(IntegerAttr)
+    a = operand_def(riscv.IntRegisterType)
+    b = operand_def(riscv.IntRegisterType)
+
+    def __init__(self, a: SSAValue | Operation, b: SSAValue | Operation, *, register: int):
+        super().__init__(operands=[a, b], properties={"register": _i32(register)})
+
+    def custom0_operands(self) -> tuple[int, int, int, int, int]:
+        return (3, _int_attr(self.register), 0, _reg_index(self.a.type), _reg_index(self.b.type))
+
+
+@irdl_op_definition
 class ReadResult4ColOp(LoomCustom0Op):
     """Read four int8 results down a column (rows r0..r0+3 of column c,
     index r0 * cols + c), packed little-endian (READ_RESULT funct7=2,
@@ -254,6 +272,7 @@ LoomRISCV = Dialect(
         ReadResult4Op,
         ReadResult4ColOp,
         WriteLutOp,
+        WriteConfig2Op,
     ],
     [],
 )

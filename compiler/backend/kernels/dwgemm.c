@@ -154,6 +154,23 @@ void loom_dwgemm(void) {
             int oy0 = m0 / OW, ox0 = m0 % OW;            /* rows 0..3 */
             int oy1 = (m0 + 4) / OW, ox1 = (m0 + 4) % OW; /* rows 4..7 */
             CFU_W(6, 1, 0, 0);
+#if !CHANNEL_MAJOR && OW % 8 == 0
+            /* Dense conv, tap-major K (line = tap * C + c): build each kernel
+             * row for every channel first, then the lines come out in order
+             * and need no per-line pointer. */
+            (void)oy1, (void)ox1;
+            for (int ky = 0; ky < 3; ++ky) {
+                u32 a[3][C], b[3][C];
+#pragma clang loop unroll(full)
+                for (int cl = 0; cl < C; ++cl)
+                    chw3x3_row8(src + cl * PLANE, oy0, ox0, ky, &a[0][cl], &a[1][cl], &a[2][cl],
+                                &b[0][cl], &b[1][cl], &b[2][cl]);
+#pragma clang loop unroll(full)
+                for (int kx = 0; kx < 3; ++kx)
+#pragma clang loop unroll(full)
+                    for (int cl = 0; cl < C; ++cl) CFU_W(6, 0, a[kx][cl], b[kx][cl]);
+            }
+#else
 #if CHANNEL_MAJOR
             for (int cl = 0; cl < 8; ++cl) {
                 const u8 *plane = src + (g * 8 + cl) * PLANE;
@@ -181,6 +198,7 @@ void loom_dwgemm(void) {
 #undef LINE
                 }
             }
+#endif /* dense tap-major sequential */
 #endif /* GATHER */
             }
             if (t == 0) continue;

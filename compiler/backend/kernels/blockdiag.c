@@ -11,6 +11,10 @@
  */
 #include <stdint.h>
 
+#ifndef UNIFORM
+#define UNIFORM 0
+#endif
+
 typedef int8_t i8;
 typedef int32_t i32;
 typedef int64_t i64;
@@ -52,9 +56,19 @@ void loom_blockdiag(void) {
 #if LUT_ADDR
                 x = lut[x];
 #endif
+#if UNIFORM
+                acc += x * UNI_W;
+#else
                 acc += x * wgt[t * C + c];
+#endif
             }
+#if UNIFORM
+            /* Same weight and requant params for every channel (e.g. average
+             * pooling): constants instead of per-channel loads. */
+            i32 v = rdbpot(srdhm(acc + UNI_BIAS, UNI_MULT), UNI_SHIFT) + OUT_ZP;
+#else
             i32 v = rdbpot(srdhm(acc + bias[c], mult[c]), shift[c]) + OUT_ZP;
+#endif
             dst[row * C + c] = (i8)(v < ACT_MIN ? ACT_MIN : v > ACT_MAX ? ACT_MAX : v);
         }
     }

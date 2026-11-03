@@ -1,3 +1,4 @@
+const csr = @import("csr");
 const std = @import("std");
 const builtin = @import("builtin");
 const cpu_csr = @import("cpu_csr.zig");
@@ -251,13 +252,21 @@ fn callCode(addr: u32, len: u32) ExecError!void {
     flushDataCaches();
 }
 
+/// Make CPU writes visible to the CFU DMA readers, which read DRAM directly.
+///
+/// The VexRiscv dcache is write-through and nothing but the CPU writes
+/// memory (the DMAs only read), so the dcache never holds stale data and is
+/// not invalidated: that only threw away warm constants every step. The
+/// write-back L2 (direct-mapped) is flushed by reading one L2-size window,
+/// which evicts every dirty line; with no L2 there is nothing to do.
 fn flushDataCaches() void {
-    asm volatile (".word(0x500F)");
     flushL2Cache();
 }
 
+const config_l2_size: usize = if (@hasDecl(csr, "config_l2_size")) @intCast(csr.config_l2_size) else 128;
+
 fn flushL2Cache() void {
-    const config_l2_size = 128;
+    if (config_l2_size == 0) return;
     const base: [*]volatile u32 = @ptrFromInt(0x40000000);
     for (0..(2 * config_l2_size / @sizeOf(u32))) |idx| {
         _ = base[idx];

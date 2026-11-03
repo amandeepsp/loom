@@ -159,50 +159,6 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
     return _for_ops(region.lower, region.upper, region.step, n_body)
 
 
-def _n_region_keep_act_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
-    """Single M tile, many N tiles: DMA the activations once per N region.
-
-    Every N tile then DMAs only its weights; the first compute swaps both
-    banks, later ones keep the activation bank (flag bit 3 = n > first n).
-    """
-    mr = region.m_region
-    kr = mr.k_regions[0]
-    nbytes = kr.k_count * ctx.spec.tile
-    m0 = rv32.LiOp(0)
-    k0 = rv32.LiOp(kr.lower)
-    n_first = rv32.LiOp(region.lower)
-    act_ops, act_addr = _activation_dma_addr(ctx.spec, m0.rd, k0.rd, n_first.rd)
-
-    def n_body(n_iv: SSAValue) -> list[Operation]:
-        m = rv32.LiOp(0)
-        k = rv32.LiOp(kr.lower)
-        wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_iv, k.rd)
-        flags_ops, flags = _compute_flags(ctx.spec, kr, k.rd)
-        first_n = rv32.LiOp(region.lower)
-        delta = riscv.XorOp(n_iv, first_n.rd)
-        zero = rv32.LiOp(0)
-        not_first = riscv.SltuOp(zero.rd, delta.rd)
-        bit3 = riscv.SlliOp(not_first.rd, 3)
-        keep = riscv.AddOp(flags, bit3.rd)
-        k_count = rv32.LiOp(kr.k_count)
-        return [
-            *_epilogue_ops(ctx, region.n_count, n_iv),
-            m, k, *wgt_ops,
-            *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, nbytes),
-            *_dma_complete_ops(ctx.csr),
-            *flags_ops, first_n, delta, zero, not_first, bit3, keep, k_count,
-            loom_riscv.ComputeStartOp(keep.rd, k_count.rd),
-            loom_riscv.ComputeWaitOp(),
-            *_store_result_ops(ctx, region.n_count, m.rd, n_iv),
-        ]
-
-    return [
-        m0, k0, n_first, *act_ops,
-        *_dma_kick_ops(ctx.csr.act_dma, act_addr, nbytes),
-        *_for_ops(region.lower, region.upper, region.step, n_body),
-    ]
-
-
 def _n_region_single_m_prefetch_ops(
     ctx: RiscvLoweringContext, region: NRegion, m_reg: SSAValue | None = None,
 ) -> list[Operation]:

@@ -138,7 +138,7 @@ def sim_port(request: pytest.FixtureRequest) -> str:
         sys.executable, "-u", "-m", "soc.sim",
         "--cfu-rows", "8", "--cfu-cols", "8",
         "--cfu-store-depth", "512", "--cfu-in-width", "8",
-        "--l2-size", "128",
+        "--l2-size", os.environ.get("LOOM_SIM_L2", "128"),
         "--sdram-init", str(FW_BIN),
         "--output-dir", str(BUILD_DIR),
         "--non-interactive",

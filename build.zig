@@ -85,6 +85,16 @@ pub fn build(b: *std.Build) void {
     ) catch null;
     if (maybe_contents) |contents| {
         const parsed = std.json.parseFromSlice(std.json.Value, b.allocator, contents, .{}) catch return;
+        // Integer SoC constants (e.g. config_l2_size) for the firmware.
+        if (parsed.value.object.get("constants")) |consts| {
+            var cit = consts.object.iterator();
+            while (cit.next()) |entry| {
+                switch (entry.value_ptr.*) {
+                    .integer => |v| csr_options.addOption(i64, entry.key_ptr.*, v),
+                    else => {},
+                }
+            }
+        }
         if (parsed.value.object.get("csr_registers")) |regs| {
             var it = regs.object.iterator();
             while (it.next()) |entry| {

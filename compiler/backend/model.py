@@ -479,6 +479,16 @@ def block_diagonal_weight(layer, taps: int, tile: int = 8) -> np.ndarray:
     return out
 
 
+def _uniform_blockdiag_defines(diag: np.ndarray, layer) -> dict[str, int]:
+    """blockdiag.c constants when every channel shares weight and requant params."""
+    bias, mult, shift = (np.asarray(a) for a in (layer.bias, layer.multiplier, layer.shift))
+    if not (np.all(diag == diag[0]) and np.all(bias == bias[0])
+            and np.all(mult == mult[0]) and np.all(shift == shift[0])):
+        return {}
+    return {"UNIFORM": 1, "UNI_W": int(diag[0]), "UNI_BIAS": int(bias[0]),
+            "UNI_MULT": int(mult[0]), "UNI_SHIFT": int(shift[0])}
+
+
 def _cfu_lut(planner, index: int, lut: np.ndarray, enabled: bool) -> int:
     """256-byte result LUT for the CFU, indexed by the result's unsigned byte."""
     if not enabled:
@@ -796,6 +806,7 @@ def _compile_quantized_mobilenet(
                 "LUT_ADDR": transform_addr, "M": layer.m, "C": layer.n, "TAPS": cpu_taps,
                 "OUT_ZP": layer.output_zero_point,
                 "ACT_MIN": layer.activation_min, "ACT_MAX": layer.activation_max,
+                **_uniform_blockdiag_defines(np.frombuffer(weight_data, np.int8), layer),
             })
             functions.append(RiscvFunction(layer.name, code, ""))
             kernels.append(GemmKernel(

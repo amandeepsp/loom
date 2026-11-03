@@ -133,12 +133,7 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
                 *_dma_kick_ops(ctx.csr.wgt_dma, wgt_addr, kr.k_count * ctx.spec.tile),
                 # Wait for it once; it stays enabled (and done) for the M loop.
                 *_dma_complete_ops(ctx.csr, [ctx.csr.wgt_dma]),
-                *_for_ops(
-                    0,
-                    mr.upper,
-                    mr.step,
-                    lambda m_iv: _m_region_body(ctx, region.n_count, mr, n_iv, m_iv, keep_wgt=True),
-                ),
+                *_m_loop_keep_wgt_pipelined(ctx, region.n_count, mr, n_iv),
             ]
         return [
             *_epilogue_ops(ctx, region.n_count, n_iv),
@@ -194,6 +189,68 @@ def _n_region_keep_act_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[O
         m0, k0, n_first, *act_ops,
         *_dma_kick_ops(ctx.csr.act_dma, act_addr, nbytes),
         *_for_ops(region.lower, region.upper, region.step, n_body),
+    ]
+
+
+def _m_loop_keep_wgt_pipelined(
+    ctx: RiscvLoweringContext,
+    n_count: int,
+    mr: MRegion,
+    n_iv: SSAValue,
+) -> list[Operation]:
+    """M loop of one N tile (weights already resident), DMA overlapped.
+
+    Tile m + 1's activation DMA fills the free bank while tile m computes
+    and stores: prologue DMA for tile 0, then per tile start(m), kick DMA
+    (m + 1), wait compute, store, wait DMA. The last tile is peeled so no
+    DMA reads past the input. Flag bit 2 keeps the weight bank after the
+    first tile.
+    """
+    spec = ctx.spec
+    kr = mr.k_regions[0]
+    nbytes = kr.k_count * spec.tile
+    act = ctx.csr.act_dma
+
+    def kick_act(m_reg: SSAValue) -> list[Operation]:
+        k0 = rv32.LiOp(kr.lower)
+        addr_ops, addr = _activation_dma_addr(spec, m_reg, k0.rd, n_iv)
+        return [k0, *addr_ops, *_dma_kick_ops(act, addr, nbytes)]
+
+    def start(keep: SSAValue | None) -> list[Operation]:
+        k0 = rv32.LiOp(kr.lower)
+        flags_ops, flags = _compute_flags(spec, kr, k0.rd)
+        ops: list[Operation] = [k0, *flags_ops]
+        if keep is not None:
+            bit2 = riscv.SlliOp(keep, 2)
+            with_keep = riscv.AddOp(flags, bit2.rd)
+            ops += [bit2, with_keep]
+            flags = with_keep.rd
+        k_count = rv32.LiOp(kr.k_count)
+        return [*ops, k_count, loom_riscv.ComputeStartOp(flags, k_count.rd)]
+
+    def body(m_iv: SSAValue) -> list[Operation]:
+        zero = rv32.LiOp(0)
+        not_first = riscv.SltuOp(zero.rd, m_iv)
+        m_next = riscv.AddiOp(m_iv, mr.step)
+        return [
+            zero, not_first, *start(not_first.rd),
+            m_next, *kick_act(m_next.rd),
+            loom_riscv.ComputeWaitOp(),
+            *_store_result_ops(ctx, n_count, m_iv, n_iv),
+            *_dma_complete_ops(ctx.csr, [act]),
+        ]
+
+    m0 = rv32.LiOp(0)
+    m_last = rv32.LiOp(mr.upper - mr.step)
+    one = rv32.LiOp(1)
+    return [
+        m0, *kick_act(m0.rd), *_dma_complete_ops(ctx.csr, [act]),
+        *_for_ops(0, mr.upper - mr.step, mr.step, body),
+        one, *start(one.rd),
+        # Also keeps COMPUTE_WAIT a few instructions after START.
+        *_dma_stop_ops(act),
+        loom_riscv.ComputeWaitOp(),
+        m_last, *_store_result_ops(ctx, n_count, m_last.rd, n_iv),
     ]
 
 

@@ -39,7 +39,7 @@ verilog:
 # CFU features the current RTL implements (see compiler/backend/target.py).
 # Verified on hardware: packed_read. keep_wgt/keep_act are implemented in RTL
 # but their codegen hangs the firmware (under investigation), so not listed.
-cfu_features := "keep_wgt,result_lut,act_write,keep_act,col_params"
+cfu_features := "keep_wgt,result_lut,act_write,keep_act,col_params,linegen,linegen_tworow"
 soc_baud := "1000000"
 # 48 MHz builds are marginal on paths nextpnr's Gowin timing model does not
 # flag (placement-dependent wrong outputs); 40.5 MHz (27 MHz x 1.5) is exact.
@@ -50,7 +50,7 @@ sys_clk := "40.5e6"
 # always gate a new bitstream (python -m tools.perf_loop) before flashing.
 # No L2: the 128 B write-allocate L2 thrashed on strided stores and doubled
 # dcache refill cost (needs the local litex-boards target honoring --l2-size).
-soc seed="5": verilog
+soc seed="9": verilog
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
         --build --toolchain apicula --pnr-seed {{ seed }} --l2-size 0 --cfu-act-addr-width 10 \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \

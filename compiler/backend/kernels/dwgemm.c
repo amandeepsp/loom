@@ -17,7 +17,7 @@
  * Constants (-D): source/shape as chw3x3.h plus C, OH, OW, PLANE, SRC_ADDR,
  * CHANNEL_MAJOR (1: depthwise, group g reads channels 8g..8g+7, K row
  * c_local * 9 + tap; 0: dense, one group, K row tap * C + c), N, KG,
- * WGT_ADDR, BIAS_ADDR, MULT_ADDR, SHIFT_ADDR, OUT_ZP, ACT_MIN, ACT_MAX,
+ * PARAM_ROWS (8, or 1 with per-column params), WGT_ADDR, BIAS_ADDR, MULT_ADDR, SHIFT_ADDR, OUT_ZP, ACT_MIN, ACT_MAX,
  * CFU_LUT_ADDR, OUT_ADDR, MSTRIDE, CSTRIDE, and the weight DMA CSRs
  * WGT_CSR_BASE, WGT_CSR_LENGTH, WGT_CSR_ENABLE, WGT_CSR_LOOP, WGT_CSR_DRAINED.
  */
@@ -91,7 +91,7 @@ void loom_dwgemm(void) {
         for (int col = 0; col < 8; ++col) {
             int n = g * 8 + col;
             i32 b = bias[n], mu = mult[n], sh = shift[n];
-            for (int r = 0; r < 8; ++r) {
+            for (int r = 0; r < PARAM_ROWS; ++r) { /* 1 on col_params CFUs */
                 CFU_W(2, 0, r * 8 + col, b);
                 CFU_W(2, 1, r * 8 + col, mu);
                 CFU_W(2, 2, r * 8 + col, sh);

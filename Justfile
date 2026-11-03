@@ -48,7 +48,7 @@ sys_clk := "40.5e6"
 # Build the LiteX SoC + bitstream for the Tang Nano 20K (slow, ~30-40 min).
 # Gowin placement is seed-sensitive: try `just soc seed=11` if it fails, and
 # always gate a new bitstream (python -m tools.perf_loop) before flashing.
-soc seed="2": verilog
+soc seed="7": verilog
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
         --build --toolchain apicula --pnr-seed {{ seed }} \
         --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \

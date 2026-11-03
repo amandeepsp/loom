@@ -104,6 +104,7 @@ class Top(Cfu):
         m = super().elaborate(platform)
 
         rows, cols = self.config.rows, self.config.cols
+        assert cols & (cols - 1) == 0, "per-column param indexing needs power-of-two cols"
 
         # === Submodules ===================================================
 
@@ -207,7 +208,10 @@ class Top(Cfu):
         # === Param store → Epilogue (comb read, same cycle as epi_data) ===
 
         m.d.comb += [
-            params.rd_addr.eq(seq.epi_index),
+            # Per-channel params depend only on the column: read slot c of
+            # result (r, c), so software uploads row 0 only (`col_params`).
+            # Software that writes every row still works.
+            params.rd_addr.eq(seq.epi_index & (cols - 1)),  # cols: power of two
             epi.bias.eq(params.bias),
             epi.multiplier.eq(params.multiplier),
             epi.shift.eq(params.shift),

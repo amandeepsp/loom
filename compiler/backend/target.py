@@ -95,6 +95,9 @@ class GemmTargetSpec:
     # once per GEMM; 0 disables it) and READ_RESULT funct7=2 reads columns.
     result_lut: bool = False
     cfu_lut_addr: int = 0
+    # `col_params` CFU: epilogue params are read per column, so only the
+    # row-0 slots (channel index = column) need uploading.
+    col_params: bool = False
 
     @property
     def cpu_store_lut(self) -> bool:

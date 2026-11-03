@@ -883,6 +883,7 @@ def _compile_quantized_mobilenet(
             output_channel_stride=chw_stride,
             result_lut=result_lut,
             cfu_lut_addr=cfu_lut_addr,
+            col_params="col_params" in cfu_features(csr_json),
             packed_output_addr=fused_addr,
             store_lut_addr=fused_lut_addr,
             m=padded_m,
@@ -931,6 +932,7 @@ def _compile_quantized_mobilenet(
                 "WGT_CSR_BASE": wgt.base, "WGT_CSR_LENGTH": wgt.length,
                 "WGT_CSR_ENABLE": wgt.enable, "WGT_CSR_LOOP": wgt.loop,
                 "WGT_CSR_DRAINED": wgt.drained,
+                "PARAM_ROWS": 1 if "col_params" in features else tile,
             })
             asm = ""
             kind = layer.kind + "_fused"
@@ -1144,6 +1146,7 @@ def _compile_tosa_module(
             cfu_store_depth_words=cfu_store_depth_words,
             # Clears the sticky CFU result-LUT enable on result_lut bitstreams.
             result_lut="result_lut" in cfu_features(csr_json),
+            col_params="col_params" in cfu_features(csr_json),
         )
         riscv_code = b""
         if emit_code and csr_map is not None:

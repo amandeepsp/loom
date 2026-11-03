@@ -110,6 +110,8 @@ def _n_region_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]
     if (ctx.spec.keep_act and single_chunk and mr.upper <= mr.step
             and region.upper - region.lower > region.step):
         return _n_region_keep_act_ops(ctx, region)
+    if (ctx.spec.keep_wgt and single_chunk and mr.upper >= 2 * mr.step):
+        return _n_region_keep_wgt_prefetch_ops(ctx, region)
     def n_body(n_iv: SSAValue) -> list[Operation]:
         # Epilogue params depend only on the N tile and live in a CFU memory
         # that nothing else writes, so upload them once per N tile rather
@@ -192,11 +194,50 @@ def _n_region_keep_act_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[O
     ]
 
 
+def _n_region_keep_wgt_prefetch_ops(ctx: RiscvLoweringContext, region: NRegion) -> list[Operation]:
+    """N loop whose weight DMA for tile n + 1 runs during tile n's M loop.
+
+    With keep_wgt only an N tile's first compute swaps the weight banks;
+    after it the fill bank is idle, so the next N tile's weights are kicked
+    right then and merely waited for at the next N tile's start. The last
+    N tile prefetches one tile past this layer's weights (harmless reads of
+    the following constants); that transfer is drained before returning.
+    """
+    mr = region.m_region
+    kr = mr.k_regions[0]
+    wgt = ctx.csr.wgt_dma
+    nbytes = kr.k_count * ctx.spec.tile
+
+    def kick_wgt(n_reg: SSAValue) -> list[Operation]:
+        k0 = rv32.LiOp(kr.lower)
+        wgt_ops, wgt_addr = _weight_dma_addr(ctx.spec, n_reg, k0.rd)
+        return [k0, *wgt_ops, *_dma_kick_ops(wgt, wgt_addr, nbytes)]
+
+    def n_body(n_iv: SSAValue) -> list[Operation]:
+        n_next = riscv.AddiOp(n_iv, region.step)
+        return [
+            *_epilogue_ops(ctx, region.n_count, n_iv),
+            *_dma_complete_ops(ctx.csr, [wgt]),
+            *_m_loop_keep_wgt_pipelined(
+                ctx, region.n_count, mr, n_iv,
+                after_first_start=[n_next, *kick_wgt(n_next.rd)]),
+        ]
+
+    n0 = rv32.LiOp(region.lower)
+    return [
+        n0, *kick_wgt(n0.rd),
+        *_for_ops(region.lower, region.upper, region.step, n_body),
+        *_dma_complete_ops(ctx.csr, [wgt]),
+    ]
+
+
 def _m_loop_keep_wgt_pipelined(
     ctx: RiscvLoweringContext,
     n_count: int,
     mr: MRegion,
     n_iv: SSAValue,
+    *,
+    after_first_start: list[Operation] | None = None,
 ) -> list[Operation]:
     """M loop of one N tile (weights already resident), DMA overlapped.
 
@@ -243,9 +284,25 @@ def _m_loop_keep_wgt_pipelined(
     m0 = rv32.LiOp(0)
     m_last = rv32.LiOp(mr.upper - mr.step)
     one = rv32.LiOp(1)
+    if after_first_start is not None:
+        # Peel tile 0 so the hook runs right after the first (bank-swapping)
+        # start. Needs at least two M tiles.
+        assert mr.upper >= 2 * mr.step
+        m1 = rv32.LiOp(mr.step)
+        first = [
+            *start(None), m1, *kick_act(m1.rd), *after_first_start,
+            loom_riscv.ComputeWaitOp(),
+            *_store_result_ops(ctx, n_count, m0.rd, n_iv),
+            *_dma_complete_ops(ctx.csr, [act]),
+        ]
+        loop_lb = mr.step
+    else:
+        first = []
+        loop_lb = 0
     return [
         m0, *kick_act(m0.rd), *_dma_complete_ops(ctx.csr, [act]),
-        *_for_ops(0, mr.upper - mr.step, mr.step, body),
+        *first,
+        *_for_ops(loop_lb, mr.upper - mr.step, mr.step, body),
         one, *start(one.rd),
         # Also keeps COMPUTE_WAIT a few instructions after START.
         *_dma_stop_ops(act),
@@ -655,7 +712,14 @@ def _epilogue_params_unrolled(
                 for field, value in enumerate(values)
             )]
 
-        out += _for_ops(0, spec.tile, 1, row_body)
+        if spec.col_params:
+            col_reg = rv32.LiOp(col)
+            out += [col_reg, *(
+                loom_riscv.WriteEpilogueParamOp(col_reg.rd, value, field=field)
+                for field, value in enumerate(values)
+            )]
+        else:
+            out += _for_ops(0, spec.tile, 1, row_body)
     return out
 
 

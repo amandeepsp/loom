@@ -561,3 +561,36 @@ class TestWriteAct:
         sim.add_clock(1e-6)
         sim.add_testbench(testbench)
         sim.run()
+
+
+class TestColumnParams:
+    def test_row0_params_apply_to_every_row(self):
+        ROWS, COLS, K = 8, 8, 4
+        rng = np.random.default_rng(11)
+        A = rng.integers(-20, 20, size=(ROWS, K), dtype=np.int8)
+        B = rng.integers(-20, 20, size=(K, COLS), dtype=np.int8)
+        bias = [int(x) for x in rng.integers(-500, 500, size=COLS)]
+        mult = [int(x) for x in rng.integers(0x30000000, 0x7FFFFFFF, size=COLS)]
+        shift = [int(x) for x in rng.integers(0, 4, size=COLS)]
+        C = A.astype(np.int32) @ B.astype(np.int32)
+        expected = [ref_epilogue(int(C[r, c]), bias[c], mult[c], shift[c], 0, -128, 127)
+                    for r in range(ROWS) for c in range(COLS)]
+        act = [pack_int8([int(A[r, k]) for r in range(ROWS)]) for k in range(K)]
+        wgt = [pack_int8([int(B[k, c]) for c in range(COLS)]) for k in range(K)]
+        dut = Top(TopConfig(rows=ROWS, cols=COLS))
+
+        async def testbench(ctx):
+            # Only slots 0..COLS-1 (row 0) are written.
+            await write_per_channel_params(ctx, dut, bias, mult, shift)
+            await cfu_op(ctx, dut, funct3=3, funct7=1, in0=0, in1=(-128) & 0xFF)
+            await cfu_op(ctx, dut, funct3=3, funct7=2, in0=0, in1=127)
+            await dma_fill(ctx, dut.dma_act, act)
+            await dma_fill(ctx, dut.dma_wgt, wgt)
+            await run_tile(ctx, dut, k=K, first=True, last=True)
+            for i, e in enumerate(expected):
+                assert to_signed8(await cfu_op(ctx, dut, funct3=4, funct7=0, in0=i, in1=0)) == e, i
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        sim.run()

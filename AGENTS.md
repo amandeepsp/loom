@@ -26,8 +26,10 @@ Run/test recipes take `target=hw|sim` (default `hw`). Set `LOOM_PORT` and
 
 ```sh
 just verilog          # regenerate top.v from Amaranth
-just soc              # verilog → LiteX SoC → bitstream (slow; writes csr.json)
-just flash            # write bitstream to SPI flash
+just soc              # verilog → LiteX SoC → bitstream at the pinned seed (slow; writes csr.json + manifest.json)
+just soc-seeds        # placement-only screen of 16 nextpnr seeds (~5 min); lists the ones that place
+just toolchain-check  # compare the FPGA toolchain with soc/toolchain.json (soc runs it)
+just flash            # write bitstream to SPI flash; records it in soc/bitstream.json
 just reset            # reload FPGA from flash
 just firmware         # build hw firmware (needs csr.json from `just soc`)
 just up               # build firmware, reset, serial-boot it, ping
@@ -192,10 +194,18 @@ uv run litex_term /dev/ttyUSB1  # not litex_term directly
    `loom_cfu_features` file next to `csr.json` (`just soc` writes it from the
    Justfile's `cfu_features`), or `$LOOM_CFU_FEATURES`. The compiler only uses
    what the marker lists, so a marker must match the flashed bitstream.
-7. **Placement fails** ("unable to find legal placement") → seed-sensitive and
-   the design is near the limit; try several `just soc seed=N` (build in
-   parallel into separate `--output-dir`s). The `soc` default is the last seed
-   that placed.
+7. **Placement fails** ("unable to find legal placement") → the design fills
+   ~92% of the LUT sites (count LUT4 + ALU: carry cells sit on LUT sites), so
+   only some nextpnr seeds place. Builds are deterministic: `tools/soc_build.py`
+   removes the LiteX build timestamp (it sat in a LUT ROM, so every build was
+   a new netlist and re-rolled which seeds place) and makes Yosys source paths
+   relative (Yosys bakes paths into cell names). So `pnr_seed` in the Justfile
+   reproduces for a fixed RTL + toolchain, and `soc/bitstream.json` records
+   the flashed bitstream (seed, top.v / .fs hashes, utilization). After an RTL
+   or toolchain change, run `just soc-seeds` (failures show in placement,
+   ~3 min, not after an hour of routing), then pin a seed that placed.
+   nextpnr placer knobs don't help (`--placer-heap-beta` 0.8/0.95 ≈ default;
+   `--placer sa` segfaults on this build).
 8. **litex-boards** → The board target needs local edits (drained CSR,
    `--l2-size` honored, result write-back hook):
    `soc/patches/litex-boards-sipeed_tang_nano_20k.patch`.
@@ -205,6 +215,11 @@ uv run litex_term /dev/ttyUSB1  # not litex_term directly
 10. **Before an hour-long bitstream build** → run the Verilator model check:
     `LOOM_SIM_L2=0 uv run pytest tests/test_sim.py -k mobilenet --run-sim`
     (every layer bit-exact on the current RTL).
+11. **Toolchain drift** → the seed only reproduces with the pinned toolchain:
+    oss-cad-suite, litex repos (`../litex/*` commits) and the litex-boards
+    patch, all in `soc/toolchain.json`. `just soc` refuses a mismatch
+    (`LOOM_SKIP_TOOLCHAIN_CHECK=1` overrides); re-pin deliberately with
+    `uv run python -m tools.toolchain snapshot --write`, then re-screen seeds.
 
 ## Debugging Firmware
 

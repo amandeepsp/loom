@@ -37,25 +37,42 @@ verilog:
     uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }}
 
 # CFU features the current RTL implements (see compiler/backend/target.py),
-# written to the build marker by `soc`. All verified on hardware (seed 9).
+# written to the build marker by `soc`. All verified on hardware (flashed seed-9 build, soc/bitstream.json).
 cfu_features := "keep_wgt,result_lut,act_write,keep_act,col_params,linegen,linegen_tworow,linegen_v2,result_wb"
 soc_baud := "1000000"
 # 48 MHz builds are marginal on paths nextpnr's Gowin timing model does not
 # flag (placement-dependent wrong outputs); 40.5 MHz (27 MHz x 1.5) is exact.
 sys_clk := "40.5e6"
 
-# Build the LiteX SoC + bitstream for the Tang Nano 20K (slow, ~30-40 min).
-# Gowin placement is seed-sensitive: try `just soc seed=11` if it fails, and
-# always gate a new bitstream (python -m tools.perf_loop) before flashing.
+# nextpnr seed for the current RTL. The design fills ~92% of the LUT sites,
+# so only some seeds place. Builds are deterministic (tools/soc_build.py pins
+# the timestamp and source paths), so a seed reproduces for a fixed RTL +
+# toolchain (soc/toolchain.json). After either changes, re-screen with
+# `just soc-seeds` and pin a seed that placed here.
+pnr_seed := "1"
+
 # No L2: the 128 B write-allocate L2 thrashed on strided stores and doubled
 # dcache refill cost (needs the local litex-boards target honoring --l2-size).
-soc seed="9": verilog
-    {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k \
-        --build --toolchain apicula --pnr-seed {{ seed }} --l2-size 0 --cfu-act-addr-width 10 \
-        --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v \
-        {{ _cfu_args }} --with-cfu-led-debug --uart-baudrate {{ soc_baud }} \
-        --sys-clk-freq {{ sys_clk }}
+_soc_args := "--toolchain apicula --l2-size 0 --cfu-act-addr-width 10" \
+    + " --cpu-type vexriscv --cpu-variant full+cfu --cpu-cfu top.v " + _cfu_args \
+    + " --with-cfu-led-debug --uart-baudrate " + soc_baud + " --sys-clk-freq " + sys_clk
+
+# Always gate a new bitstream (python -m tools.perf_loop) before relying on it.
+# Build the LiteX SoC + bitstream for the Tang Nano 20K (slow, ~30-60 min).
+soc seed=pnr_seed: toolchain-check verilog
+    {{ cad_env }} uv run python -m tools.soc_build build --seed {{ seed }} -- {{ _soc_args }}
     echo "{{ cfu_features }}" > {{ hw_dir }}/loom_cfu_features
+    uv run python -m tools.toolchain manifest --build-dir {{ hw_dir }} --seed {{ seed }}
+
+# Then `just soc seed=N` with a seed that placed, and pin N as pnr_seed.
+# Screen nextpnr seeds by placement only and list the ones that place (~5 min).
+soc-seeds seeds="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16" jobs="16": toolchain-check verilog
+    {{ cad_env }} uv run python -m tools.soc_build screen --seeds "{{ seeds }}" --jobs {{ jobs }} \
+        -- {{ _soc_args }}
+
+# Check the FPGA toolchain against soc/toolchain.json (soc/soc-seeds run it).
+toolchain-check:
+    {{ cad_env }} uv run python -m tools.toolchain check
 
 # Generate the simulation SoC (csr.json, BIOS) without compiling gateware.
 sim-soc: verilog
@@ -87,6 +104,8 @@ _crt0-restore build-dir:
 # Flash the bitstream to the board's SPI flash.
 flash:
     {{ cad_env }} uv run python -m litex_boards.targets.sipeed_tang_nano_20k --flash
+    @if [ -f {{ hw_dir }}/manifest.json ]; then cp {{ hw_dir }}/manifest.json soc/bitstream.json; \
+        echo "recorded the flashed bitstream in soc/bitstream.json (commit it)"; fi
 
 # Reset the FPGA (reloads the bitstream from flash).
 reset:
@@ -179,7 +198,7 @@ showcase-nextpnr:
         --json sipeed_tang_nano_20k.json --top sipeed_tang_nano_20k \
         --device GW2AR-LV18QN88C8/I7 --vopt family=GW2A-18C \
         --vopt cst=sipeed_tang_nano_20k.cst \
-        --timing-allow-fail --seed 2 --no-route \
+        --timing-allow-fail --seed {{ pnr_seed }} --no-route \
         --placed-svg ../../../build/showcase/nextpnr/placed.svg
 
 # Export square Matplotlib PNGs for social posts and routing review.

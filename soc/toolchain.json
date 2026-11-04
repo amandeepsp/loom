@@ -1,0 +1,47 @@
+{
+  "_comment": "Pinned FPGA toolchain; see tools/toolchain.py. Re-pin only deliberately: a new toolchain re-rolls which pnr seeds place.",
+  "oss_cad_suite": "20260310",
+  "yosys": "0.63+89 de99d67bb",
+  "nextpnr_himbaechel": "nextpnr-0.9-101-g62f24f6f",
+  "apycula": "0.32.dev10+g2fef05fc6",
+  "zig": "0.17.0",
+  "litex_repos": {
+    "litex": {
+      "commit": "07b162232b335d4f24bdf6c1af1925f7928c4f34",
+      "url": "https://github.com/enjoy-digital/litex.git"
+    },
+    "litex-boards": {
+      "commit": "68fa60f422ebc496dd85167eb388fc28e66be13c",
+      "url": "https://github.com/litex-hub/litex-boards.git"
+    },
+    "litedram": {
+      "commit": "51de2b05e9b8e555cde8ff5508b5996945a2fd22",
+      "url": "https://github.com/enjoy-digital/litedram.git"
+    },
+    "liteeth": {
+      "commit": "5689d38172f2abcfc177b2714b7eb46c13231776",
+      "url": "https://github.com/enjoy-digital/liteeth.git"
+    },
+    "pythondata-cpu-vexriscv": {
+      "commit": "1979a644dbe64d8d32dfbdd970dccee6add63723",
+      "url": "https://github.com/litex-hub/pythondata-cpu-vexriscv.git"
+    },
+    "pythondata-software-compiler_rt": {
+      "commit": "fcb03245613ccf3079cc833a701f13d0beaae09d",
+      "url": "https://github.com/litex-hub/pythondata-software-compiler_rt.git"
+    },
+    "pythondata-software-picolibc": {
+      "commit": "4dbc2c3ffb06454a91d3101e27fa625d3a5f2069",
+      "url": "https://github.com/litex-hub/pythondata-software-picolibc.git"
+    },
+    "pythondata-misc-tapcfg": {
+      "commit": "fbcb02422940bbb97c492f0c970959d262b33632",
+      "url": "https://github.com/litex-hub/pythondata-misc-tapcfg.git"
+    }
+  },
+  "litex_boards_patch": {
+    "path": "soc/patches/litex-boards-sipeed_tang_nano_20k.patch",
+    "sha256": "0a660e51e3a153a448d63bdf2442e784eb890c553ccaa45bd7906abca067fda8",
+    "applied": true
+  }
+}

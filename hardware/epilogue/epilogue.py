@@ -1,7 +1,7 @@
 """Epilogue — 1-stage requantization pipeline with result storage.
 
 Accepts INT32 accumulator values one-per-cycle from the sequencer,
-produces INT8 outputs stored in internal result registers.
+produces INT8 outputs stored in per-row result LUTRAMs.
 
 Pipeline: +bias (comb) -> SRDHM (1 reg stage) -> RDBPOT (comb)
           -> +offset (comb) -> clamp (comb) -> INT8 (reg) -> optional LUT
@@ -65,6 +65,7 @@ class Epilogue(Component):
             "out_data4col": Out(32),
             # Write-back readback: all rows of column wb_col.
             "wb_col": In(3),
+            "wb_active": In(1),
             "out_col8": Out(64),
             # Result LUT (64 x 32-bit words) and its enable
             "lut_wr_addr": In(6),
@@ -157,33 +158,54 @@ class Epilogue(Component):
             m.d.comb += final.eq(clamped_r)
 
         # --- Result storage ---
-        results = Array(
-            Signal(signed(self._out_width), name=f"epi_r_{i}") for i in range(num)
-        )
-        write_idx = Signal(range(num))
+        # One small LUTRAM per row, addressed by column (index = row*cols +
+        # col, written in that order). Every read is a column read: all rows
+        # at one column come out in parallel, and a single result is a row
+        # select of that. A 64-entry register file cost ~830 LUTs on Gowin
+        # (write-enable decode + 64:1 and column muxes); this is 16
+        # RAM16SDP4 + a few dozen LUTs, and has spare depth for a 2nd bank.
+        cols = self._cols or num
+        assert cols & (cols - 1) == 0 and num % cols == 0, "cols must be a power of two"
+        rows = num // cols
+        lc = ceil_log2(cols)
+        wr_col = Signal(range(cols))
+        wr_row = Signal(range(rows))
 
         m.d.sync += self.done.eq(0)
         with m.If(valid_out2):
-            m.d.sync += [
-                results[write_idx].eq(final),
-                write_idx.eq(write_idx + 1),
-            ]
+            with m.If(wr_col == cols - 1):
+                m.d.sync += [wr_col.eq(0), wr_row.eq(wr_row + 1)]
+            with m.Else():
+                m.d.sync += wr_col.eq(wr_col + 1)
             with m.If(last_out2):
-                m.d.sync += [
-                    self.done.eq(1),
-                    write_idx.eq(0),
-                ]
+                m.d.sync += [self.done.eq(1), wr_col.eq(0), wr_row.eq(0)]
+
+        # Read column: write-back's while it streams, else READ_RESULT's.
+        rd_col = Signal(range(cols))
+        m.d.comb += rd_col.eq(Mux(self.wb_active, self.wb_col, self.out_addr[:lc]))
+        row_data = []
+        for r in range(rows):
+            mem = Memory(shape=signed(self._out_width), depth=cols, init=[])
+            m.submodules[f"res_row{r}"] = mem
+            wp = mem.write_port()
+            rp = mem.read_port(domain="comb")
+            m.d.comb += [
+                wp.addr.eq(wr_col),
+                wp.data.eq(final),
+                wp.en.eq(valid_out2 & (wr_row == r)),
+                rp.addr.eq(rd_col),
+            ]
+            row_data.append(rp.data)
 
         # Readback - always active
-        m.d.comb += self.out_data.eq(results[self.out_addr])
-        # Column readback: all rows of column wb_col (result write-back), and
-        # READ_RESULT's 4-row column reads as one half of it (the CFU drives
-        # wb_col from the read index when no write-back runs).
-        cols = self._cols
-        if cols and cols & (cols - 1) == 0 and num // cols == 8:
-            lc = ceil_log2(cols)
-            m.d.comb += self.out_col8.eq(Cat(*(
-                results[Cat(self.wb_col[:lc], Const(r, 3))] for r in range(8))))
+        if rows == 1:
+            m.d.comb += self.out_data.eq(row_data[0])
+        else:
+            m.d.comb += self.out_data.eq(Array(row_data)[self.out_addr[lc:]])
+        # Column readback: all rows of the read column (result write-back),
+        # and READ_RESULT's 4-row column reads as one half of it.
+        if rows == 8:
+            m.d.comb += self.out_col8.eq(Cat(*row_data))
             # out_addr = r0 * cols + c with r0 in {0, 4}: bit lc + 2 picks the half.
             m.d.comb += self.out_data4col.eq(
                 Mux(self.out_addr[lc + 2], self.out_col8[32:64], self.out_col8[0:32]))

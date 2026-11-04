@@ -319,7 +319,8 @@ class Top(Cfu):
         m.d.comb += [
             self.wb_valid.eq(wb_active),
             self.wb_addr.eq(wb_addr),
-            self.epi.wb_col.eq(Mux(wb_active, wb_col[:3], self.i_read_result.out_addr[:3])),
+            self.epi.wb_col.eq(wb_col[:3]),
+            self.epi.wb_active.eq(wb_active),
             self.wb_data.eq(self.epi.out_col8),
         ]
         m.d.comb += self.i_compute_wait.seq_done.eq(

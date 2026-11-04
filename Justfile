@@ -36,10 +36,8 @@ default:
 verilog:
     uv run python -m hardware.top {{ _cfu_args }} --cfu-acc-width {{ cfu_acc_width }}
 
-# CFU features the current RTL implements (see compiler/backend/target.py).
-# Verified on hardware: packed_read. keep_wgt/keep_act are implemented in RTL
-# but their codegen hangs the firmware (under investigation), so not listed.
-# Features the current RTL implements (written to the build marker by `soc`).
+# CFU features the current RTL implements (see compiler/backend/target.py),
+# written to the build marker by `soc`. All verified on hardware (seed 9).
 cfu_features := "keep_wgt,result_lut,act_write,keep_act,col_params,linegen,linegen_tworow,linegen_v2,result_wb"
 soc_baud := "1000000"
 # 48 MHz builds are marginal on paths nextpnr's Gowin timing model does not

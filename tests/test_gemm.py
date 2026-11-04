@@ -27,6 +27,7 @@ import numpy as np
 from compiler import compile_gemm
 from compiler.backend.runtime import ModelBinaryArtifact, ModelBinaryRuntime
 from compiler.quant_utils import quantize_multiplier_less_than_one
+from shared.board import clock_hz
 from shared.protocol import PerfCounters, SerialTransport, TcpTransport
 from shared.reference import cpu_requantize
 
@@ -74,7 +75,7 @@ class GemmResult:
 
     @property
     def gops(self) -> float:
-        return 2 * self.m * self.k * self.n * 48e6 / self.cycles / 1e9
+        return 2 * self.m * self.k * self.n * clock_hz() / self.cycles / 1e9
 
 
 def make_case(m: int, k: int, n: int, seed: int = 0) -> GemmCase:

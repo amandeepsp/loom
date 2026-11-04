@@ -21,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
+from shared.board import clock_hz
+
 DEFAULT_PORT = os.environ.get("LOOM_PORT", "/dev/ttyUSB1")
 
 
@@ -174,7 +176,7 @@ def cmd_run(args) -> int:
                 if args.tolerance is not None and delta > args.tolerance:
                     failures += 1
                     parts.append("FAIL")
-            parts.append(f"{result.cycles / 48e6 * 1e3:.1f} ms on-chip")
+            parts.append(f"{result.cycles / clock_hz() * 1e3:.1f} ms on-chip")
             if i == 0:
                 parts.append(f"(wall {wall:.1f}s, uploaded {runtime.uploaded_bytes / 1024:.0f} KiB)")
             print("  ".join(parts))
@@ -205,7 +207,7 @@ def profile_rows(manifest: dict, cycles: list[int]) -> list[tuple[str, int]]:
 def print_profile(manifest: dict, cycles: list[int], top: int = 25) -> None:
     rows = profile_rows(manifest, cycles)
     total = sum(c for _, c in rows) or 1
-    print(f"\nprofile: {total:,} cycles ({total / 48e3:.1f} ms) over {len(rows)} steps")
+    print(f"\nprofile: {total:,} cycles ({total / clock_hz() * 1e3:.1f} ms) over {len(rows)} steps")
     for name, c in sorted(rows, key=lambda r: -r[1])[:top]:
         print(f"  {c:>12,}  {100 * c / total:5.1f}%  {name}")
     by_kind: dict[str, int] = {}

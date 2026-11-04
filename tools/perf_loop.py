@@ -38,6 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
+from shared.board import clock_hz as board_clock_hz
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG = REPO_ROOT / "analytics/perf_log.jsonl"
 GOLDEN_DIR = REPO_ROOT / "build/perf"
@@ -144,8 +146,7 @@ def main() -> int:
     # Steady state = last image (one-time work like constant loading is
     # paid by the first); first-image cycles are logged alongside.
     mean_cycles = int(cycles[-1])
-    clock_hz = int(json.loads(Path(args.csr_json).read_text())["constants"].get(
-        "config_clock_frequency", 48_000_000))
+    clock_hz = board_clock_hz(args.csr_json)
 
     previous = []
     if LOG.exists():

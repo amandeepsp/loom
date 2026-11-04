@@ -79,7 +79,7 @@ RTL changes and firmware builds have a strict dependency chain:
 
 ## Performance
 
-MobileNet-v1 0.25 (32x32, CIFAR-10) runs in **19.0 ms (770K cycles at
+MobileNet-v1 0.25 (32x32, CIFAR-10) runs in **18.1 ms (732K cycles at
 40.5 MHz)** on the Tang Nano 20K, bit-exact against the int8 ONNX model, down
 from 1022 ms. The big steps were CFU features (result LUT, CPU-written
 activations, per-column params, hardware depthwise im2col "LineGen", result

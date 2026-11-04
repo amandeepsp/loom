@@ -246,15 +246,101 @@ def _n_region_single_m_prefetch_ops(
             k0, *flags_ops, k_count, *m_ops, *_wb_base_ops(ctx, m_val, n_iv),
             loom_riscv.ComputeStartOp(flags, k_count.rd),
             n_next, *kick(n_next.rd, with_act=not keep_act),
+            *_param_touch_ops(ctx.spec, n_next.rd),
             loom_riscv.ComputeWaitOp(),
             *_store_result_ops(ctx, region.n_count, m_val, n_iv),
             *_dma_complete_ops(ctx.csr, [wgt] if keep_act else [act, wgt]),
         ]
 
+    if ctx.spec.wb_stride and region.upper - region.lower >= 2 * region.step:
+        return _single_m_wb_pipelined(ctx, region, kick, m_value, keep_act)
+
     n0 = rv32.LiOp(region.lower)
     return [
         n0, *kick(n0.rd, with_act=True), *_dma_complete_ops(ctx.csr, [act, wgt]),
         *_for_ops(region.lower, region.upper, region.step, n_body),
+        *_dma_stop_ops(act), *_dma_stop_ops(wgt),
+    ]
+
+
+def _param_touch_ops(spec: GemmTargetSpec, n_reg: SSAValue) -> list[Operation]:
+    """Load one word of N tile n's bias/multiplier/shift so their dcache
+    lines (one each: 8 words) are filled while the array computes, not
+    after COMPUTE_WAIT when the params are uploaded (~170-cycle refills)."""
+    nb = riscv.SlliOp(n_reg, 2)
+    ops: list[Operation] = [nb]
+    for addr in (spec.bias_addr, spec.mult_addr, spec.shift_addr):
+        base0 = rv32.LiOp(addr)
+        base = riscv.AddOp(base0.rd, nb.rd)
+        ops += [base0, base, riscv.LwOp(base.rd, 0)]
+    return ops
+
+
+def _single_m_wb_pipelined(
+    ctx: RiscvLoweringContext,
+    region: NRegion,
+    kick: Callable[[SSAValue, bool], list[Operation]],
+    m_value: Callable[[], tuple[list[Operation], SSAValue]],
+    keep_act: bool,
+) -> list[Operation]:
+    """N loop of one M tile with result write-back, WAIT -> params -> START.
+
+    With write-back the CPU never reads a tile's results, so everything that
+    does not touch the CFU's live state moves before COMPUTE_WAIT, while the
+    array is busy: the next tile's flags, k count and write-back base
+    (CONFIG 5 is latched by COMPUTE_START) and a touch of its param lines.
+    Only the param upload must follow WAIT: the running epilogue reads them.
+    The per-layer CONFIG 0-2 (zero point, clamp) are written once, not per
+    tile. The last tile's prefetch (one N tile past the weights, harmless
+    reads) is drained before returning.
+
+        n0: kick, drain, config, params(n0), START(n0), kick(n1), touch(n1)
+        n:  prep(n), drain DMAs(n), WAIT, params(n), START(n), kick(n+1), touch(n+1)
+        end: drain, WAIT, stop DMAs
+    """
+    spec = ctx.spec
+    mr = region.m_region
+    kr = mr.k_regions[0]
+    act, wgt = ctx.csr.act_dma, ctx.csr.wgt_dma
+    drain = [wgt] if keep_act else [act, wgt]
+
+    def prep(n_reg: SSAValue, first: bool) -> tuple[list[Operation], Operation]:
+        k0 = rv32.LiOp(kr.lower)
+        flags_ops, flags = _compute_flags(spec, kr, k0.rd)
+        ops: list[Operation] = [k0, *flags_ops]
+        if keep_act and not first:
+            bit3 = rv32.LiOp(8)  # keep the activation bank (not the first N tile)
+            with_keep = riscv.AddOp(flags, bit3.rd)
+            ops += [bit3, with_keep]
+            flags = with_keep.rd
+        k_count = rv32.LiOp(kr.k_count)
+        m_ops, m_val = m_value()
+        ops += [k_count, *m_ops, *_wb_base_ops(ctx, m_val, n_reg)]
+        return ops, loom_riscv.ComputeStartOp(flags, k_count.rd)
+
+    def body(n_iv: SSAValue) -> list[Operation]:
+        prep_ops, start_n = prep(n_iv, first=False)
+        n_next = riscv.AddiOp(n_iv, region.step)
+        return [
+            *prep_ops, *_dma_complete_ops(ctx.csr, drain),
+            loom_riscv.ComputeWaitOp(),
+            *_epilogue_params_unrolled(ctx, region.n_count, n_iv),
+            start_n,
+            n_next, *kick(n_next.rd, not keep_act), *_param_touch_ops(spec, n_next.rd),
+        ]
+
+    n0 = rv32.LiOp(region.lower)
+    n1 = rv32.LiOp(region.lower + region.step)
+    prep0, start0 = prep(n0.rd, first=True)
+    return [
+        n0, *kick(n0.rd, True), *_dma_complete_ops(ctx.csr, [act, wgt]),
+        *_layer_config_ops(ctx),
+        *_epilogue_params_unrolled(ctx, region.n_count, n0.rd),
+        *prep0, start0,
+        n1, *kick(n1.rd, not keep_act), *_param_touch_ops(spec, n1.rd),
+        *_for_ops(region.lower + region.step, region.upper, region.step, body),
+        *_dma_complete_ops(ctx.csr, drain),
+        loom_riscv.ComputeWaitOp(),
         *_dma_stop_ops(act), *_dma_stop_ops(wgt),
     ]
 
@@ -347,6 +433,10 @@ def _m_loop_keep_wgt_pipelined(
             *_dma_complete_ops(ctx.csr, [act]),
         ]
 
+    if spec.wb_stride and mr.upper >= 2 * mr.step:
+        return _m_loop_keep_wgt_wb_pipelined(
+            ctx, mr, kick_act, start, after_first_start=after_first_start)
+
     m0 = rv32.LiOp(0)
     m_last = rv32.LiOp(mr.upper - mr.step)
     one = rv32.LiOp(1)
@@ -374,6 +464,67 @@ def _m_loop_keep_wgt_pipelined(
         *_dma_stop_ops(act),
         loom_riscv.ComputeWaitOp(),
         *_store_result_ops(ctx, n_count, m_last.rd, n_iv),
+    ]
+
+
+def _m_loop_keep_wgt_wb_pipelined(
+    ctx: RiscvLoweringContext,
+    mr: MRegion,
+    kick_act: Callable[[SSAValue], list[Operation]],
+    start: Callable[[SSAValue | None, SSAValue], list[Operation]],
+    *,
+    after_first_start: list[Operation] | None = None,
+) -> list[Operation]:
+    """M loop with result write-back: COMPUTE_START(m) right after WAIT(m - 1).
+
+    With write-back the CPU never reads a tile's results: COMPUTE_WAIT
+    returns once the CFU has handed every column to the write-back DMA, so
+    the result buffer is free and the next tile can start immediately. Every
+    instruction that does not need the previous tile to be finished runs
+    before its WAIT, while the array is busy: tile m's flags and k count,
+    its write-back base (CONFIG 5 is latched by COMPUTE_START, so writing it
+    while tile m - 1 is in flight is safe) and the check that tile m's
+    activation DMA has landed. That leaves WAIT -> START back to back:
+
+        start(0); kick(1)
+        for m in 1..last-1: prep(m); drained(act m); WAIT; START(m); kick(m+1)
+        prep(last); drained; WAIT; START(last); stop act DMA; WAIT
+
+    Measured on conv_2 (K=8, 256 tiles): ~56 cycles/tile of CPU latency
+    between WAIT and START before this. Needs at least two M tiles.
+    """
+    act = ctx.csr.act_dma
+
+    def split_start(keep: SSAValue | None, m_reg: SSAValue) -> tuple[list[Operation], Operation]:
+        ops = start(keep, m_reg)
+        assert isinstance(ops[-1], loom_riscv.ComputeStartOp)
+        return ops[:-1], ops[-1]
+
+    m0 = rv32.LiOp(0)
+    m1 = rv32.LiOp(mr.step)
+    one = rv32.LiOp(1)
+    prep0, start0 = split_start(None, m0.rd)
+
+    def body(m_iv: SSAValue) -> list[Operation]:
+        prep, start_m = split_start(one.rd, m_iv)
+        m_next = riscv.AddiOp(m_iv, mr.step)
+        return [
+            *prep, *_dma_complete_ops(ctx.csr, [act]),
+            loom_riscv.ComputeWaitOp(), start_m,
+            m_next, *kick_act(m_next.rd),
+        ]
+
+    m_last = rv32.LiOp(mr.upper - mr.step)
+    prep_last, start_last = split_start(one.rd, m_last.rd)
+    return [
+        m0, one, *kick_act(m0.rd), *_dma_complete_ops(ctx.csr, [act]),
+        *prep0, start0, m1, *kick_act(m1.rd), *(after_first_start or []),
+        *_for_ops(mr.step, mr.upper - mr.step, mr.step, body),
+        m_last, *prep_last, *_dma_complete_ops(ctx.csr, [act]),
+        loom_riscv.ComputeWaitOp(), start_last,
+        # Also keeps COMPUTE_WAIT a few instructions after START.
+        *_dma_stop_ops(act),
+        loom_riscv.ComputeWaitOp(),
     ]
 
 
@@ -453,8 +604,12 @@ def _epilogue_ops(
     n_count: int,
     n_iv: SSAValue,
 ) -> list[Operation]:
+    return [*_epilogue_params_unrolled(ctx, n_count, n_iv), *_layer_config_ops(ctx)]
+
+
+def _layer_config_ops(ctx: RiscvLoweringContext) -> list[Operation]:
+    """Per-layer epilogue config: output zero point and activation clamp."""
     return [
-        *_epilogue_params_unrolled(ctx, n_count, n_iv),
         out_zp := rv32.LiOp(ctx.spec.output_offset),
         act_min := rv32.LiOp(ctx.spec.activation_min),
         act_max := rv32.LiOp(ctx.spec.activation_max),

@@ -1,22 +1,22 @@
 {
-  "seed": 9,
-  "git": "3a26151",
+  "seed": 1,
+  "git": "ac991eb30027",
   "top_v_sha256": "95c036b60cb23019148f847e3aa465b6b95edb2d343c5a207ea9874c122c87b3",
-  "fs_sha256": "1c2b111b0d6d53bc2f710eb785a9b96fa90d0d90e11c8e618ad6b4d4d269a3ed",
+  "fs_sha256": "79fb454a5c7023235c9916a3289045b727db5df1820d7fee77ba27242060fd00",
   "cfu_features": "keep_wgt,result_lut,act_write,keep_act,col_params,linegen,linegen_tworow,linegen_v2,result_wb",
   "utilization": {
-    "LUT4": 14077,
+    "LUT4": 14308,
     "ALU": 4334,
     "DFF": 7816,
     "RAM16SDP4": 98,
     "BSRAM": 39,
     "MULT9X9": 64,
-    "LUT4+ALU": 18411,
+    "LUT4+ALU": 18642,
     "LUT_sites": 20736
   },
   "fmax_mhz": {
-    "crg_clkin": 456.2,
-    "crg_clkout": 91.55
+    "crg_clkin": 414.25,
+    "crg_clkout": 70.56
   },
   "toolchain": {
     "oss_cad_suite": "20260310",
@@ -64,5 +64,5 @@
       "applied": true
     }
   },
-  "note": "Flashed 2026-11-04. perf_loop: 769,755 cycles (19.0 ms) MobileNet, bit-exact. fmax is nextpnr's Gowin estimate against a 12 MHz default constraint, not a sign-off; the board runs at 40.5 MHz (48 MHz was marginal on earlier builds). Built before deterministic builds (tools/soc_build.py): its netlist embeds a LiteX build timestamp, so `just soc seed=9` does not regenerate it; keep the .fs."
+  "note": "Flashed 2026-11-04; deterministic build (tools/soc_build.py): `just soc` at this commit and toolchain regenerates it. perf_loop: 769,910 cycles (19.01 ms) MobileNet, bit-identical to golden. fmax is nextpnr's Gowin estimate against a 12 MHz default constraint, not a sign-off; the board runs at 40.5 MHz."
 }
